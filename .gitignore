@@ -1,0 +1,13 @@
+data/
+model/
+__pycache__/
+cache/
+multi_run_results/
+results/
+*backup*
+visualizations/
+ablation_results/
+analysis/figures/
+test*
+*.zip
+log*.txt

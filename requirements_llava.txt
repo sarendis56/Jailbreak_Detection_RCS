@@ -1,0 +1,67 @@
+# Core ML libraries
+# For RTX 5090, this may not work. 
+# Our setups are Python 3.10.18, PyTorch 2.8.0, Cuda 12.8, and torchvision 0.23.0. Update accordingly. 
+torch>=2.1.2
+torchvision>=0.16.2
+
+# Transformers and LLaVA-specific
+transformers>=4.37.2
+tokenizers>=0.15.1
+sentencepiece>=0.1.99
+accelerate>=0.21.0
+peft
+bitsandbytes
+
+# Data processing and ML
+numpy>=1.17
+pandas>=1.0.0
+scikit-learn>=1.0.0
+scipy>=1.8.0
+
+# Image and vision processing
+pillow>=8.0.0
+timm>=0.6.13
+einops>=0.6.1
+einops-exts>=0.0.4
+
+# Progress and utilities
+tqdm>=4.27
+joblib>=1.2.0
+threadpoolctl>=3.1.0
+matplotlib
+seaborn
+datasets
+psutil
+
+# Web and API support
+gradio>=4.16.0
+gradio_client>=0.8.1
+fastapi
+uvicorn
+requests>=2.20.0
+httpx>=0.24.0
+
+# HuggingFace ecosystem
+huggingface-hub>=0.30.0
+safetensors>=0.4.3
+
+# File format support
+pyyaml>=5.1
+regex
+pyarrow
+fastparquet
+protobuf>=3.20.0
+markdown2
+shortuuid
+
+# Network and encoding
+charset-normalizer
+idna
+urllib3
+certifi
+
+# Additional dependencies from original requirements
+pydantic
+markdown-it-py
+MarkupSafe
+jinja2

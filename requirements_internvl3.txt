@@ -1,0 +1,45 @@
+# Core ML libraries. For RTX 5090, you might need newer versions. Refer to the comments in llava requirements.
+torch>=2.1.2
+torchvision>=0.16.2
+
+# torch>=2.8.0
+# torchvision>=0.23.0
+
+# Transformers ecosystem
+transformers>=4.37.2
+tokenizers>=0.15.1
+sentencepiece>=0.1.99
+accelerate>=0.21.0
+safetensors>=0.4.3
+huggingface-hub>=0.30.0
+
+# Optional performance (enable if your CUDA toolchain supports it)
+flash-attn
+
+# Data processing and ML
+numpy>=1.17
+pandas>=1.0.0
+scikit-learn>=1.0.0
+scipy>=1.8.0
+seaborn
+matplotlib
+datasets
+
+# Image/vision and video
+pillow>=8.0.0
+timm>=0.6.13
+einops>=0.6.1
+einops-exts>=0.0.4
+decord
+
+# Progress and utilities
+tqdm>=4.27
+psutil
+requests>=2.20.0
+httpx>=0.24.0
+
+# File formats
+pyyaml>=5.1
+pyarrow
+fastparquet
+protobuf>=3.20.0
