@@ -13,13 +13,13 @@ import torch
 
 # Set to True to download the model, False to skip
 MODELS_TO_DOWNLOAD = {
-    'llava_vicuna_7b': False,
-    'flava': True,                  # FLAVA (~2GB) - Facebook's multimodal model, baseline and more visualization
+    'llava_vicuna_7b': True,
+    'flava': False,                  # FLAVA (~2GB) - Facebook's multimodal model, baseline and more visualization
     'clip_base': False,              # CLIP ViT Base (~600MB) - For JailDAM baseline
     'clip_large': False,             # CLIP ViT Large (~1.7GB) - LLaVA vision tower
     'qwen25_vl_3b': False,          # Qwen2.5-VL-3B-Instruct (~6GB) - Qwen model
-    'qwen25_vl_7b': False,          # Qwen2.5-VL-7B-Instruct (~13GB) - Larger Qwen model
-    'internvl3_8b': True,          # InternVL3-8B (~15GB) - OpenGVLab model
+    'qwen25_vl_7b': True,          # Qwen2.5-VL-7B-Instruct (~13GB) - Larger Qwen model
+    'internvl3_8b': False,          # InternVL3-8B (~15GB) - OpenGVLab model
 }
 
 # Estimated total sizes (approximate)

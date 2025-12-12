@@ -36,7 +36,7 @@ def create_directory_structure():
         "data/XSTest",
         "data/MM-Vet",
         "data/FigTxt",
-        "data/JailbreakV-28K",
+        "data/JailBreakV-28K",
         "data/VAE"
     ]
     
@@ -71,6 +71,9 @@ def download_alpaca():
         }
         samples.append(sample)
 
+    # Ensure directory exists before writing
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     # Save to JSON file
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(samples, f, indent=2, ensure_ascii=False)
@@ -115,6 +118,9 @@ def download_advbench():
                 sample["target"] = item[target_field]
             samples.append(sample)
 
+    # Ensure directory exists before writing
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     # Save to JSON file
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(samples, f, indent=2, ensure_ascii=False)
@@ -159,6 +165,9 @@ def download_dan_prompts():
                     sample[key] = value
             samples.append(sample)
 
+    # Ensure directory exists before writing
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     # Save to JSON file
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(samples, f, indent=2, ensure_ascii=False)
@@ -196,6 +205,9 @@ def download_openassistant():
             }
             samples.append(sample)
 
+    # Ensure directory exists before writing
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     # Save to JSON file
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(samples, f, indent=2, ensure_ascii=False)
@@ -252,6 +264,9 @@ def download_vqav2():
         }
         samples.append(sample)
 
+    # Ensure directory exists before writing
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     # Save to JSON file
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(samples, f, indent=2, ensure_ascii=False)
@@ -317,6 +332,7 @@ def download_xstest():
     print(f"Successfully saved {len(csv_data)} XSTest samples to {parquet_output_path} (Parquet format)")
 
     # Keep JSON version for backward compatibility
+    os.makedirs(os.path.dirname(json_output_path), exist_ok=True)
     with open(json_output_path, 'w', encoding='utf-8') as f:
         json.dump(json_samples, f, indent=2, ensure_ascii=False)
     print(f"Successfully saved {len(json_samples)} XSTest samples to {json_output_path} (JSON format)")
@@ -434,13 +450,13 @@ def print_manual_instructions():
     print("     - data/FigTxt/benign_questions.csv")
     print("     - data/FigTxt/safebench.csv")
     
-    print("\n3. JailbreakV-28K (Multimodal Jailbreaks)")
+    print("\n3. JailBreakV-28k (Multimodal Jailbreaks)")
     print("   - Download from: https://github.com/SaFoLab-WISC/JailBreakV_28K")
-    print("   - Place files at:")
-    print("     - data/JailbreakV-28K/mini_JailBreakV_28K.csv")
-    print("     - data/JailbreakV-28K/figstep/")
-    print("     - data/JailbreakV-28K/llm_transfer_attack/")
-    print("     - data/JailbreakV-28K/query_related/")
+    print("   - Place files at (NOTE: the directory name is JailBreakV-28k, case-sensitive!):")
+    print("     - data/JailBreakV-28k/mini_JailBreakV_28K.csv")
+    print("     - data/JailBreakV-28k/figstep/")
+    print("     - data/JailBreakV-28k/llm_transfer_attack/")
+    print("     - data/JailBreakV-28k/query_related/")
     
     print("\n4. VAE Adversarial Images")
     print("   - Download from: https://github.com/Unispac/Visual-Adversarial-Examples-Jailbreak-Large-Language-Models")
@@ -453,6 +469,10 @@ def main():
     print("="*80)
     print("VLM JAILBREAK DETECTION - DATASET DOWNLOADER")
     print("="*80)
+    
+    # Create directory structure first
+    print("\nCreating directory structure...")
+    create_directory_structure()
     
     # Track success/failure
     success_count = 0

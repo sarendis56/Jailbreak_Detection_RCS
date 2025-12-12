@@ -40,7 +40,7 @@ from llava.mm_utils import (
     get_model_name_from_path,
 )
 from load_datasets import *
-from generic_classifier import FeatureCache
+from feature_cache import FeatureCache
 
 
 def discover_refusal_tokens_llava(model, tokenizer, image_processor, max_iterations=3, top_k=5):

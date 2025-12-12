@@ -1,13 +1,23 @@
 data/
+data
 model/
+model
 __pycache__/
+# *result*.csv
+# *pca.png
+# *tsne.png
+# *analysis.png
 cache/
+cache_last_token/
+cache_mean_pooling/
 multi_run_results/
 results/
 *backup*
 visualizations/
 ablation_results/
+loss_ablation_results/
 analysis/figures/
 test*
 *.zip
+download_*
 log*.txt

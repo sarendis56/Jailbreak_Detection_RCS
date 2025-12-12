@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
 """
-Balanced Jailbreak Detection with FLAVA and New Dataset Configuration
-
-This script uses FLAVA (Foundational Language And Vision Alignment) from Meta to extract features
+FLAVA (Foundational Language And Vision Alignment) from Meta to extract features
 from the last token of the corresponding encoder (text-only or image-text pairs) and trains
 classifiers to detect jailbreaking attempts.
-
-Training Set (2,000 examples, 1:1 ratio):
-- Benign (1,000): Alpaca (500) + MM-Vet (218) + OpenAssistant (282)
-- Malicious (1,000): AdvBench (300) + JailbreakV-28K (550) + DAN variants (150)
-
-Test Set (1,800 examples, 1:1 ratio):
-- Safe (900): XSTest safe (250) + FigTxt safe (300) + VQAv2 (350)
-- Unsafe (900): XSTest unsafe (200) + FigTxt unsafe (350) + VAE (200) + JailbreakV-28K (150)
-
-IMPORTANT: JailbreakV-28K Train/Test Separation:
-- Training: Uses llm_transfer_attack (275) + query_related (275) = 550 samples total
-- Testing: Uses figstep attack only (150 samples)
-This ensures different attack types between training and testing for robust evaluation.
-
-This ensures strict train-test separation and balanced evaluation.
 """
 
 import csv

@@ -1,12 +1,8 @@
-# Core ML libraries. For RTX 5090, you might need newer versions. Refer to the comments in llava requirements.
-torch>=2.1.2
-torchvision>=0.16.2
-
-# torch>=2.8.0
-# torchvision>=0.23.0
+torch>=2.8.0
+torchvision>=0.23.0
 
 # Transformers ecosystem
-transformers>=4.37.2
+transformers>=4.57.1
 tokenizers>=0.15.1
 sentencepiece>=0.1.99
 accelerate>=0.21.0

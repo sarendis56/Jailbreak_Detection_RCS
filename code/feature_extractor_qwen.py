@@ -6,7 +6,7 @@ from io import BytesIO
 import os
 import tempfile
 from tqdm import tqdm
-from generic_classifier import FeatureCache
+from feature_cache import FeatureCache
 import gc
 import psutil
 

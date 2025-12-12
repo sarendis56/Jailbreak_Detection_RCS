@@ -5,7 +5,7 @@ from PIL import Image
 from io import BytesIO
 import re
 from tqdm import tqdm
-from generic_classifier import FeatureCache
+from feature_cache import FeatureCache
 import gc
 import psutil
 
@@ -240,7 +240,8 @@ class HiddenStateExtractor:
             return None, None
 
     def extract_hidden_states(self, dataset, dataset_name, layer_start=None, layer_end=None,
-                            use_cache=True, label_key='toxicity', batch_size=10, memory_cleanup_freq=5, experiment_name=None):
+                            use_cache=True, label_key='toxicity', batch_size=10, memory_cleanup_freq=5,
+                            experiment_name=None, token_strategy='last_token'):
         """
         Extract hidden states with improved memory management for large datasets
 
@@ -253,7 +254,17 @@ class HiddenStateExtractor:
             batch_size: Process in batches to manage memory
             memory_cleanup_freq: Clean GPU memory every N samples
             experiment_name: Optional experiment name for cache organization
+        Args (additional):
+            token_strategy: 'last_token' (default), 'mean_pool', or 'last_5_tokens' to control how token
+                representations are aggregated before caching.
         """
+        valid_strategies = {'last_token', 'mean_pool', 'last_5_tokens'}
+        if token_strategy is None:
+            token_strategy = 'last_token'
+        token_strategy = token_strategy.lower()
+        if token_strategy not in valid_strategies:
+            print(f"Warning: Unknown token_strategy '{token_strategy}'. Falling back to 'last_token'.")
+            token_strategy = 'last_token'
         # Set default layer ranges if not provided
         if layer_start is None or layer_end is None:
             default_start, default_end = self.get_default_layer_range()
@@ -343,8 +354,17 @@ class HiddenStateExtractor:
                         # Now that we include all layers (0-32), we don't need the +1 offset
                         if layer_idx < len(outputs.hidden_states):
                             hidden_state = outputs.hidden_states[layer_idx]
-                            last_token_hidden = hidden_state[:, -1, :].cpu().numpy().flatten()  # Get last token, flatten, move to CPU
-                            batch_hidden_states[layer_idx].append(last_token_hidden)
+                            if token_strategy == 'mean_pool':
+                                token_representation = hidden_state.mean(dim=1)
+                            elif token_strategy == 'last_5_tokens':
+                                # Average the last 5 tokens (or all tokens if sequence is shorter)
+                                seq_len = hidden_state.shape[1]
+                                num_tokens = min(5, seq_len)
+                                token_representation = hidden_state[:, -num_tokens:, :].mean(dim=1)
+                            else:  # 'last_token' (default)
+                                token_representation = hidden_state[:, -1, :]
+                            vector = token_representation.cpu().numpy().reshape(-1)
+                            batch_hidden_states[layer_idx].append(vector)
                         else:
                             print(f"Warning: Layer {layer_idx} not found in outputs (only {len(outputs.hidden_states)} layers available)")
                             # Add zero vector for missing layers
@@ -420,7 +440,8 @@ class HiddenStateExtractor:
             metadata = {
                 'dataset_size': len(dataset),
                 'label_key': label_key,
-                'processed_samples': len(labels)
+                'processed_samples': len(labels),
+                'token_strategy': token_strategy
             }
             self.cache.save(dataset_name, self.model_path, layer_range, all_hidden_states, labels,
                           metadata, dataset_size, experiment_name)

@@ -627,7 +627,7 @@ def main():
     if dataset_available == dataset_total and model_available == model_total:
         print("\n[SUCCESS] All enabled datasets and models are available!")
         print("[READY] You can now run your experiments:")
-        print("   python code/main_mcd_kmeans.py --model llava")
+        print("   python code/balanced_ood_mcd_kmeans.py")
     else:
         print("\n[INCOMPLETE] Setup incomplete:")
         if dataset_available < dataset_total:

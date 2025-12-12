@@ -1,4 +1,50 @@
 #!/usr/bin/env python3
+"""
+Principled Layer Selection for Jailbreak Detection
+EXPERIMENTS:
+  1. SGXSTest (Original): Paired dataset with carefully curated benign/malicious pairs
+  2. Noisy Distribution: Random unmatched samples from benign and malicious datasets
+  3. Latent Neighbor: Synthetic pairs created via embedding similarity (nearest neighbors)
+  4. In-the-Wild: Actual training split (multimodal + text-only, unpaired)
+  5. XSTest: Similar to SGXSTest but used in training (for comparison)
+
+METRICS EVALUATED:
+  - Distributional Divergence: MMD, Wasserstein Distance, KL Divergence
+  - Geometric Separation: SVM Margin, Silhouette Coefficient, Distance Ratio
+  - Information-Theoretic: Mutual Information, Entropy Reduction
+
+USAGE:
+    python principled_layer_selection.py <model_type> [model_path] [experiments]
+    
+    Arguments:
+        model_type: qwen | llava | internvl
+        model_path: (optional) Path to the model directory
+                    If not provided, auto-detects from model/ directory:
+                    - llava -> model/llava-v1.6-vicuna-7b/
+                    - qwen -> model/qwen2.5-vl-7b-instruct/
+                    - internvl -> model/internvl3-8b/
+        experiments: (optional) Comma-separated list of experiment numbers (1-5), e.g., "1,2,3,4,5"
+                     If not specified, runs all experiments (1,2,3,4,5)
+    
+    Examples:
+        # Run all experiments (auto-detect model path)
+        python analysis/principled_layer_selection.py llava
+        
+        # Run only experiments 1 and 3 (auto-detect model path)
+        python analysis/principled_layer_selection.py llava 1,3
+        
+        # Run with custom model path
+        python analysis/principled_layer_selection.py llava model/llava-v1.6-vicuna-7b/ 1,3
+        
+        # Run experiment 5 (XSTest)
+        python analysis/principled_layer_selection.py llava 5
+
+OUTPUT:
+    - CSV files with detailed results for each experiment
+    - Correlation analysis comparing experiments
+    - Visualization plots (if matplotlib available)
+"""
+
 import numpy as np
 import pandas as pd
 import json
@@ -26,36 +72,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'code'))
 
 from load_datasets import *
 
-# Try to import the appropriate extractor based on available modules
-try:
-    from feature_extractor_qwen import HiddenStateExtractor as QwenHiddenStateExtractor
-    QWEN_AVAILABLE = True
-    print("✅ Qwen extractor imported successfully")
-except ImportError as e:
-    QWEN_AVAILABLE = False
-    print(f"❌ Qwen extractor import failed: {e}")
-
-try:
-    from feature_extractor import HiddenStateExtractor as LLaVAHiddenStateExtractor
-    LLAVA_AVAILABLE = True
-    print("✅ LLaVA extractor imported successfully")
-except ImportError as e:
-    LLAVA_AVAILABLE = False
-    print(f"❌ LLaVA extractor import failed: {e}")
-
-# InternVL extractor (optional)
-try:
-    from code.feature_extractor_internvl import HiddenStateExtractor as InternVLHiddenStateExtractor
-    INTERNVL_AVAILABLE = True
-    print("✅ InternVL extractor imported successfully")
-except Exception as e:
-    try:
-        from feature_extractor_internvl import HiddenStateExtractor as InternVLHiddenStateExtractor
-        INTERNVL_AVAILABLE = True
-        print("✅ InternVL extractor imported successfully")
-    except Exception as e2:
-        INTERNVL_AVAILABLE = False
-        print(f"❌ InternVL extractor import failed: {e2}")
+# Model paths in model/ directory (from download_models.py)
+MODEL_PATHS = {
+    'llava': 'model/llava-v1.6-vicuna-7b/',
+    'qwen': 'model/qwen2.5-vl-7b-instruct/',
+    'internvl': 'model/internvl3-8b/'
+}
 
 class LayerDiscriminativeAnalyzer:
     """
@@ -66,20 +88,22 @@ class LayerDiscriminativeAnalyzer:
     def __init__(self, model_path: str, model_type: str):
         self.model_path = model_path
         model_type = model_type.lower()
+        
+        # Import only the specified model extractor
         if model_type == 'qwen':
-            if not QWEN_AVAILABLE:
-                raise ImportError("Qwen extractor not available. Run in qwen25vl environment.")
+            from feature_extractor_qwen import HiddenStateExtractor as QwenHiddenStateExtractor
             self.extractor = QwenHiddenStateExtractor(model_path)
         elif model_type == 'llava':
-            if not LLAVA_AVAILABLE:
-                raise ImportError("LLaVA extractor not available. Run in llava environment.")
+            from feature_extractor import HiddenStateExtractor as LLaVAHiddenStateExtractor
             self.extractor = LLaVAHiddenStateExtractor(model_path)
         elif model_type == 'internvl':
-            if not INTERNVL_AVAILABLE:
-                raise ImportError("InternVL extractor not available. Ensure InternVL extractor exists and environment is set up.")
+            try:
+                from code.feature_extractor_internvl import HiddenStateExtractor as InternVLHiddenStateExtractor
+            except ImportError:
+                from feature_extractor_internvl import HiddenStateExtractor as InternVLHiddenStateExtractor
             self.extractor = InternVLHiddenStateExtractor(model_path)
         else:
-            raise ValueError("Unknown model_type. Use one of: 'qwen', 'llava', 'internvl'.")
+            raise ValueError(f"Unknown model_type: {model_type}. Use one of: 'qwen', 'llava', 'internvl'.")
         self.results = {}
 
     def _get_model_name_for_filename(self):
@@ -144,11 +168,393 @@ class LayerDiscriminativeAnalyzer:
             return samples
             
         except Exception as e:
-            print(f"❌ Error loading SGXSTest dataset: {e}")
-            print("❌ Dataset is required for analysis. Please ensure:")
+            print(f"Error loading SGXSTest dataset: {e}")
+            print("Dataset is required for analysis. Please ensure:")
             print("   1. You have access to the gated dataset")
             print("   2. Your HuggingFace token is properly configured")
             raise RuntimeError(f"Failed to load required SGXSTest dataset: {e}")
+    
+    def load_xstest_dataset(self) -> List[Dict]:
+        """
+        Load the XSTest dataset (similar to SGXSTest but used in training).
+        
+        Returns:
+            List of samples with 'txt', 'img', and 'toxicity' fields
+        """
+        print("Loading XSTest dataset...")
+        try:
+            samples = load_XSTest()
+            
+            print(f"Successfully loaded {len(samples)} samples from XSTest")
+            
+            # Verify we have balanced classes
+            benign_count = sum(1 for s in samples if s['toxicity'] == 0)
+            malicious_count = sum(1 for s in samples if s['toxicity'] == 1)
+            print(f"Dataset composition: {benign_count} benign, {malicious_count} malicious")
+            
+            return samples
+            
+        except Exception as e:
+            print(f"Error loading XSTest dataset: {e}")
+            raise RuntimeError(f"Failed to load XSTest dataset: {e}")
+    
+    def load_noisy_distribution_dataset(self, n_samples: int = 100) -> List[Dict]:
+        """
+        Experiment 1: Load random, unmatched samples from benign and malicious datasets.
+        This tests if layer selection works without carefully curated pairs.
+        
+        Args:
+            n_samples: Number of samples per class (default: 100 to match SGXSTest size)
+        
+        Returns:
+            List of samples with no semantic relationship between benign and malicious pairs
+        """
+        print("Loading random, unmatched samples...")
+        
+        samples = []
+        
+        # Load benign samples (random selection from Alpaca)
+        try:
+            benign_pool = load_alpaca(max_samples=None)
+            if len(benign_pool) > n_samples:
+                import random
+                random.seed(42)  # For reproducibility
+                benign_samples = random.sample(benign_pool, n_samples)
+            else:
+                benign_samples = benign_pool[:n_samples]
+            
+            for sample in benign_samples:
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 0,
+                    "experiment": "noisy_distribution"
+                })
+            
+            print(f"  Loaded {len(benign_samples)} benign samples")
+        except Exception as e:
+            print(f"  Warning: Could not load Alpaca: {e}")
+            # Fallback to other benign sources
+            try:
+                benign_pool = load_openassistant(max_samples=None)
+                if len(benign_pool) > n_samples:
+                    import random
+                    random.seed(42)
+                    benign_samples = random.sample(benign_pool, n_samples)
+                else:
+                    benign_samples = benign_pool[:n_samples]
+                
+                for sample in benign_samples:
+                    samples.append({
+                        "txt": sample.get("txt", ""),
+                        "img": sample.get("img", None),
+                        "toxicity": 0,
+                        "experiment": "noisy_distribution"
+                    })
+                print(f"  Loaded {len(benign_samples)} benign samples")
+            except Exception as e2:
+                print(f"  Error loading benign samples: {e2}")
+                raise RuntimeError("Failed to load benign samples for noisy distribution test")
+        
+        # Load malicious samples (random selection from AdvBench)
+        try:
+            malicious_pool = load_advbench(max_samples=None)
+            if len(malicious_pool) > n_samples:
+                import random
+                random.seed(42)  # For reproducibility
+                malicious_samples = random.sample(malicious_pool, n_samples)
+            else:
+                malicious_samples = malicious_pool[:n_samples]
+            
+            for sample in malicious_samples:
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 1,
+                    "experiment": "noisy_distribution"
+                })
+            
+            print(f"  Loaded {len(malicious_samples)} malicious samples")
+        except Exception as e:
+            print(f"  Warning: Could not load AdvBench: {e}")
+            # Fallback to DAN prompts
+            try:
+                malicious_pool = load_dan_prompts(max_samples=None)
+                if len(malicious_pool) > n_samples:
+                    import random
+                    random.seed(42)
+                    malicious_samples = random.sample(malicious_pool, n_samples)
+                else:
+                    malicious_samples = malicious_pool[:n_samples]
+                
+                for sample in malicious_samples:
+                    samples.append({
+                        "txt": sample.get("txt", ""),
+                        "img": sample.get("img", None),
+                        "toxicity": 1,
+                        "experiment": "noisy_distribution"
+                    })
+                print(f"  Loaded {len(malicious_samples)} malicious samples")
+            except Exception as e2:
+                print(f"  Error loading malicious samples: {e2}")
+                raise RuntimeError("Failed to load malicious samples for noisy distribution test")
+        
+        benign_count = sum(1 for s in samples if s['toxicity'] == 0)
+        malicious_count = sum(1 for s in samples if s['toxicity'] == 1)
+        print(f"  Total: {len(samples)} samples ({benign_count} benign, {malicious_count} malicious)")
+        
+        return samples
+    
+    def load_latent_neighbor_dataset(self, n_pairs: int = 100) -> List[Dict]:
+        """
+        Experiment 2: Create synthetic pairs using embedding similarity.
+        For each malicious prompt, find the nearest neighbor in the benign pool.
+        
+        Args:
+            n_pairs: Number of pairs to create (default: 100)
+        
+        Returns:
+            List of samples with synthetic pairs based on embedding similarity
+        """
+        print("Creating synthetic pairs via embedding similarity...")
+        
+        # Load malicious prompts
+        try:
+            malicious_pool = load_advbench(max_samples=None)
+            if len(malicious_pool) > n_pairs:
+                import random
+                random.seed(42)
+                malicious_samples = random.sample(malicious_pool, n_pairs)
+            else:
+                malicious_samples = malicious_pool[:n_pairs]
+            print(f"  Loaded {len(malicious_samples)} malicious prompts from AdvBench")
+        except Exception as e:
+            print(f"  Warning: Could not load AdvBench: {e}")
+            try:
+                malicious_pool = load_dan_prompts(max_samples=None)
+                if len(malicious_pool) > n_pairs:
+                    import random
+                    random.seed(42)
+                    malicious_samples = random.sample(malicious_pool, n_pairs)
+                else:
+                    malicious_samples = malicious_pool[:n_pairs]
+                print(f"  Loaded {len(malicious_samples)} malicious prompts from DAN Prompts")
+            except Exception as e2:
+                raise RuntimeError(f"Failed to load malicious samples: {e2}")
+        
+        # Load large pool of benign prompts for nearest neighbor search
+        try:
+            benign_pool = load_alpaca(max_samples=None)
+            if len(benign_pool) < n_pairs:
+                # Add more benign sources if needed
+                try:
+                    openassistant_pool = load_openassistant(max_samples=None)
+                    benign_pool.extend(openassistant_pool)
+                except:
+                    pass
+            print(f"  Loaded {len(benign_pool)} benign prompts for nearest neighbor search")
+        except Exception as e:
+            print(f"  Warning: Could not load Alpaca: {e}")
+            try:
+                benign_pool = load_openassistant(max_samples=None)
+                print(f"  Loaded {len(benign_pool)} benign prompts from OpenAssistant")
+            except Exception as e2:
+                raise RuntimeError(f"Failed to load benign pool: {e2}")
+        
+        # Use SentenceTransformer for embedding
+        print("  Computing embeddings for nearest neighbor matching...")
+        
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:
+            print(f"  Error: Failed to import sentence_transformers: {e}")
+            print("  Please install sentence-transformers: pip install sentence-transformers")
+            raise RuntimeError(f"Failed to import sentence_transformers: {e}")
+        
+        try:
+            embedder = SentenceTransformer('all-MiniLM-L6-v2')
+            print("  Using sentence-transformers for embedding")
+        except Exception as e:
+            print(f"  Error: Failed to initialize SentenceTransformer: {e}")
+            print("  This might be due to:")
+            print("    1. Network connectivity issues (model download required)")
+            print("    2. Insufficient disk space")
+            print("    3. Corrupted model cache")
+            raise RuntimeError(f"Failed to initialize SentenceTransformer: {e}")
+        
+        samples = []
+        
+        # Extract text from malicious samples
+        malicious_texts = [s.get("txt", "") for s in malicious_samples]
+        benign_texts = [s.get("txt", "") for s in benign_pool]
+        
+        try:
+            # Use sentence transformers
+            print("  Encoding malicious prompts...")
+            malicious_embeddings = embedder.encode(malicious_texts, show_progress_bar=False)
+            print("  Encoding benign pool...")
+            benign_embeddings = embedder.encode(benign_texts, show_progress_bar=False)
+            
+            # Find nearest neighbors
+            from sklearn.metrics.pairwise import cosine_similarity
+            print("  Finding nearest neighbors...")
+            similarities = cosine_similarity(malicious_embeddings, benign_embeddings)
+            
+            for i, malicious_sample in enumerate(malicious_samples):
+                # Find the most similar benign prompt
+                nearest_idx = np.argmax(similarities[i])
+                nearest_benign = benign_pool[nearest_idx]
+                similarity_score = similarities[i][nearest_idx]
+                
+                # Add malicious sample
+                samples.append({
+                    "txt": malicious_sample.get("txt", ""),
+                    "img": malicious_sample.get("img", None),
+                    "toxicity": 1,
+                    "experiment": "latent_neighbor",
+                    "pair_similarity": float(similarity_score)
+                })
+                
+                # Add matched benign sample
+                samples.append({
+                    "txt": nearest_benign.get("txt", ""),
+                    "img": nearest_benign.get("img", None),
+                    "toxicity": 0,
+                    "experiment": "latent_neighbor",
+                    "pair_similarity": float(similarity_score)
+                })
+        except Exception as e:
+            print(f"  Error: Failed during embedding computation: {e}")
+            print("  This might be due to:")
+            print("    1. Memory issues (dataset too large)")
+            print("    2. Invalid text inputs")
+            raise RuntimeError(f"Failed during embedding computation: {e}")
+        
+        benign_count = sum(1 for s in samples if s['toxicity'] == 0)
+        malicious_count = sum(1 for s in samples if s['toxicity'] == 1)
+        avg_similarity = np.mean([s.get('pair_similarity', 0) for s in samples if 'pair_similarity' in s])
+        
+        print(f"  Total: {len(samples)} samples ({benign_count} benign, {malicious_count} malicious)")
+        print(f"  Average pair similarity: {avg_similarity:.4f}")
+        
+        return samples
+    
+    def load_in_the_wild_dataset(self) -> List[Dict]:
+        """
+        Experiment 3: Use the actual training split from balanced dataset configuration.
+        This is a mixture of multimodal and text-only, unpaired samples.
+        
+        Returns:
+            List of samples from the actual training data used in experiments
+        """
+        print("Loading actual training split...")
+        
+        samples = []
+        
+        # Load balanced training data (same as in balanced_ood_kcd.py)
+        # Benign: Alpaca (500) + MM-Vet (218) + OpenAssistant (282)
+        # Malicious: AdvBench (300) + JailbreakV-28K (550) + DAN (150)
+        
+        # Benign training data
+        try:
+            alpaca_samples = load_alpaca(max_samples=500)
+            for sample in alpaca_samples:
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 0,
+                    "experiment": "in_the_wild",
+                    "source": "Alpaca"
+                })
+            print(f"  Loaded {len(alpaca_samples)} Alpaca samples")
+        except Exception as e:
+            print(f"  Warning: Could not load Alpaca: {e}")
+        
+        try:
+            mmvet_samples = load_mm_vet()
+            mmvet_benign = [s for s in mmvet_samples if s.get('toxicity', 0) == 0][:218]
+            for sample in mmvet_benign:
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 0,
+                    "experiment": "in_the_wild",
+                    "source": "MM-Vet"
+                })
+            print(f"  Loaded {len(mmvet_benign)} MM-Vet samples")
+        except Exception as e:
+            print(f"  Warning: Could not load MM-Vet: {e}")
+        
+        try:
+            openassistant_samples = load_openassistant(max_samples=282)
+            for sample in openassistant_samples:
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 0,
+                    "experiment": "in_the_wild",
+                    "source": "OpenAssistant"
+                })
+            print(f"  Loaded {len(openassistant_samples)} OpenAssistant samples")
+        except Exception as e:
+            print(f"  Warning: Could not load OpenAssistant: {e}")
+        
+        # Malicious training data
+        try:
+            advbench_samples = load_advbench(max_samples=300)
+            for sample in advbench_samples:
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 1,
+                    "experiment": "in_the_wild",
+                    "source": "AdvBench"
+                })
+            print(f"  Loaded {len(advbench_samples)} AdvBench samples")
+        except Exception as e:
+            print(f"  Warning: Could not load AdvBench: {e}")
+        
+        try:
+            # JailbreakV-28K: use llm_transfer_attack and query_related for training
+            from load_datasets import load_JailBreakV_custom
+            llm_attack = load_JailBreakV_custom(attack_types=["llm_transfer_attack"], max_samples=275)
+            query_related = load_JailBreakV_custom(attack_types=["query_related"], max_samples=275)
+            jbv_samples = (llm_attack or []) + (query_related or [])
+            for sample in jbv_samples[:550]:  # Limit to 550 total
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 1,
+                    "experiment": "in_the_wild",
+                    "source": "JailbreakV-28K"
+                })
+            print(f"  Loaded {min(550, len(jbv_samples))} JailbreakV-28K samples")
+        except Exception as e:
+            print(f"  Warning: Could not load JailbreakV-28K: {e}")
+        
+        try:
+            dan_samples = load_dan_prompts(max_samples=150)
+            for sample in dan_samples:
+                samples.append({
+                    "txt": sample.get("txt", ""),
+                    "img": sample.get("img", None),
+                    "toxicity": 1,
+                    "experiment": "in_the_wild",
+                    "source": "DAN"
+                })
+            print(f"  Loaded {len(dan_samples)} DAN samples")
+        except Exception as e:
+            print(f"  Warning: Could not load DAN Prompts: {e}")
+        
+        benign_count = sum(1 for s in samples if s['toxicity'] == 0)
+        malicious_count = sum(1 for s in samples if s['toxicity'] == 1)
+        multimodal_count = sum(1 for s in samples if s.get('img') is not None)
+        text_only_count = len(samples) - multimodal_count
+        
+        print(f"  Total: {len(samples)} samples ({benign_count} benign, {malicious_count} malicious)")
+        print(f"  Modality: {multimodal_count} multimodal, {text_only_count} text-only")
+        
+        return samples
     
     def compute_mmd(self, X: np.ndarray, Y: np.ndarray, gamma: Optional[float] = None) -> float:
         """
@@ -286,7 +692,7 @@ class LayerDiscriminativeAnalyzer:
             return float(np.mean(distances))
 
         except Exception as e:
-            print(f"❌ Error computing Wasserstein distance: {e}")
+            print(f"Error computing Wasserstein distance: {e}")
             raise RuntimeError(f"Failed to compute Wasserstein distance: {e}")
     
     def compute_kl_divergence(self, X: np.ndarray, Y: np.ndarray) -> float:
@@ -359,7 +765,7 @@ class LayerDiscriminativeAnalyzer:
             return float(js_divergence)
 
         except Exception as e:
-            print(f"❌ Error computing JS divergence: {e}")
+            print(f"Error computing JS divergence: {e}")
             raise RuntimeError(f"Failed to compute JS divergence: {e}")
     
     def compute_svm_margin(self, X: np.ndarray, y: np.ndarray) -> float:
@@ -387,7 +793,7 @@ class LayerDiscriminativeAnalyzer:
             return margin
             
         except Exception as e:
-            print(f"❌ Error computing SVM margin: {e}")
+            print(f"Error computing SVM margin: {e}")
             raise RuntimeError(f"Failed to compute SVM margin: {e}")
     
     def compute_silhouette_score(self, X: np.ndarray, y: np.ndarray) -> float:
@@ -412,7 +818,7 @@ class LayerDiscriminativeAnalyzer:
             return silhouette_score(X_scaled, y)
             
         except Exception as e:
-            print(f"❌ Error computing silhouette score: {e}")
+            print(f"Error computing silhouette score: {e}")
             raise RuntimeError(f"Failed to compute silhouette score: {e}")
 
     def compute_distance_ratio(self, X: np.ndarray, y: np.ndarray) -> float:
@@ -457,7 +863,7 @@ class LayerDiscriminativeAnalyzer:
             return inter_class_dist / avg_intra_class_dist
 
         except Exception as e:
-            print(f"❌ Error computing distance ratio: {e}")
+            print(f"Error computing distance ratio: {e}")
             raise RuntimeError(f"Failed to compute distance ratio: {e}")
 
     def compute_mutual_information(self, X: np.ndarray, y: np.ndarray) -> float:
@@ -481,7 +887,7 @@ class LayerDiscriminativeAnalyzer:
             return np.mean(mi_scores)
 
         except Exception as e:
-            print(f"❌ Error computing mutual information: {e}")
+            print(f"Error computing mutual information: {e}")
             raise RuntimeError(f"Failed to compute mutual information: {e}")
 
     def compute_conditional_entropy_reduction(self, X: np.ndarray, y: np.ndarray) -> float:
@@ -531,7 +937,7 @@ class LayerDiscriminativeAnalyzer:
             return base_entropy - conditional_entropy
 
         except Exception as e:
-            print(f"❌ Error computing conditional entropy reduction: {e}")
+            print(f"Error computing conditional entropy reduction: {e}")
             raise RuntimeError(f"Failed to compute conditional entropy reduction: {e}")
 
     def analyze_layer(self, layer_idx: int, features: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
@@ -546,14 +952,11 @@ class LayerDiscriminativeAnalyzer:
         Returns:
             Dictionary of discriminative metrics
         """
-        print(f"  Analyzing layer {layer_idx}...")
-
         # Separate benign and malicious features
         benign_features = features[labels == 0]
         malicious_features = features[labels == 1]
 
         if len(benign_features) == 0 or len(malicious_features) == 0:
-            print(f"    Warning: Layer {layer_idx} has only one class, skipping...")
             return {metric: 0.0 for metric in [
                 'mmd', 'wasserstein', 'kl_divergence', 'svm_margin',
                 'silhouette', 'distance_ratio', 'mutual_info', 'entropy_reduction'
@@ -562,25 +965,23 @@ class LayerDiscriminativeAnalyzer:
         results = {}
 
         # 1. Distributional Divergence Metrics
-        print(f"    Computing distributional divergence metrics...")
         results['mmd'] = self.compute_mmd(benign_features, malicious_features)
         results['wasserstein'] = self.compute_wasserstein_distance(benign_features, malicious_features)
         results['kl_divergence'] = self.compute_kl_divergence(benign_features, malicious_features)
 
         # 2. Geometric Separation Analysis
-        print(f"    Computing geometric separation metrics...")
         results['svm_margin'] = self.compute_svm_margin(features, labels)
         results['silhouette'] = self.compute_silhouette_score(features, labels)
         results['distance_ratio'] = self.compute_distance_ratio(features, labels)
 
         # 3. Information-Theoretic Measures
-        print(f"    Computing information-theoretic metrics...")
         results['mutual_info'] = self.compute_mutual_information(features, labels)
         results['entropy_reduction'] = self.compute_conditional_entropy_reduction(features, labels)
 
         return results
 
-    def run_comprehensive_analysis(self, dataset: List[Dict], layer_start: int = 0, layer_end: int = 31) -> Dict:
+    def run_comprehensive_analysis(self, dataset: List[Dict], layer_start: int = 0, layer_end: int = 31, 
+                                   dataset_name: str = None, experiment_name: str = None) -> Dict:
         """
         Run comprehensive discriminative analysis across all specified layers.
 
@@ -588,25 +989,26 @@ class LayerDiscriminativeAnalyzer:
             dataset: List of samples with paired benign/malicious prompts
             layer_start: Starting layer index
             layer_end: Ending layer index
+            dataset_name: Unique dataset name for caching (default: auto-generated)
+            experiment_name: Unique experiment name for caching (default: "principled_layer_selection")
 
         Returns:
             Dictionary containing analysis results for all layers
         """
-        print(f"Starting comprehensive layer analysis (layers {layer_start}-{layer_end})...")
-        print(f"Dataset size: {len(dataset)} samples")
-
+        # Use unique identifiers for caching
+        if dataset_name is None:
+            dataset_name = f"layer_selection_{len(dataset)}samples"
+        if experiment_name is None:
+            experiment_name = "principled_layer_selection"
+        
         # Extract hidden states for all layers
-        print("\n--- Extracting Hidden States ---")
         hidden_states_dict, labels, _ = self.extractor.extract_hidden_states(
-            dataset, "sgxstest_analysis",
+            dataset, dataset_name,
             layer_start=layer_start, layer_end=layer_end,
-            use_cache=True, experiment_name="principled_layer_selection"
+            use_cache=True, experiment_name=experiment_name
         )
 
-        print(f"Extracted features for {len(labels)} samples across {layer_end - layer_start + 1} layers")
-
         # Analyze each layer
-        print("\n--- Analyzing Layer Discriminative Power ---")
         layer_results = {}
 
         for layer_idx in range(layer_start, layer_end + 1):
@@ -626,8 +1028,6 @@ class LayerDiscriminativeAnalyzer:
         Returns:
             Dictionary with composite scores for each layer
         """
-        print("\n--- Computing Composite Discriminative Scores ---")
-
         composite_scores = {}
 
         # Define metric weights (can be adjusted based on importance)
@@ -730,8 +1130,6 @@ class LayerDiscriminativeAnalyzer:
         Returns:
             List of (layer_idx, overall_score, detailed_scores) tuples, sorted by score
         """
-        print("\n--- Generating Layer Ranking ---")
-
         ranking = []
         for layer_idx, scores in composite_scores.items():
             ranking.append((layer_idx, scores['overall_score'], scores))
@@ -753,8 +1151,6 @@ class LayerDiscriminativeAnalyzer:
             # Generate model-specific filename
             model_name = self._get_model_name_for_filename()
             output_path = f"results/principled_layer_selection_results_{model_name}.csv"
-
-        print(f"\n--- Saving Results to {output_path} ---")
 
         # Prepare data for CSV
         csv_data = []
@@ -778,9 +1174,9 @@ class LayerDiscriminativeAnalyzer:
             csv_data.append(row)
 
         # Save to CSV
+        os.makedirs('results', exist_ok=True)
         df = pd.DataFrame(csv_data)
         df.to_csv(output_path, index=False)
-        print(f"Results saved to {output_path}")
 
     def print_summary_report(self, ranking: List[Tuple]):
         """
@@ -992,105 +1388,442 @@ class LayerDiscriminativeAnalyzer:
         print("="*120)
 
 
+def run_single_experiment(analyzer, exp_num: int, layer_start: int, layer_end: int):
+    """
+    Run a single experiment by number.
+    
+    Args:
+        analyzer: LayerDiscriminativeAnalyzer instance
+        exp_num: Experiment number (1-4)
+        layer_start: Starting layer index
+        layer_end: Ending layer index
+    
+    Returns:
+        Dictionary with experiment results or None if failed
+    """
+    exp_configs = {
+        1: {
+            'name': 'sgxstest',
+            'load_func': analyzer.load_sgxstest_dataset,
+            'load_args': {}
+        },
+        2: {
+            'name': 'noisy_distribution',
+            'load_func': analyzer.load_noisy_distribution_dataset,
+            'load_args': {'n_samples': 100}
+        },
+        3: {
+            'name': 'latent_neighbor',
+            'load_func': analyzer.load_latent_neighbor_dataset,
+            'load_args': {'n_pairs': 100}
+        },
+        4: {
+            'name': 'in_the_wild',
+            'load_func': analyzer.load_in_the_wild_dataset,
+            'load_args': {}
+        },
+        5: {
+            'name': 'xstest',
+            'load_func': analyzer.load_xstest_dataset,
+            'load_args': {}
+        }
+    }
+    
+    if exp_num not in exp_configs:
+        raise ValueError(f"Invalid experiment number: {exp_num}. Must be 1-5.")
+    
+    config = exp_configs[exp_num]
+    exp_name = config['name']
+    
+    print(f"\nRunning Experiment {exp_num}: {exp_name.replace('_', ' ').title()}")
+    
+    try:
+        # Load dataset
+        dataset = config['load_func'](**config['load_args'])
+        
+        # Use unique experiment identifier for caching
+        exp_name = config['name']
+        dataset_name = f"exp{exp_num}_{exp_name}_{len(dataset)}samples"
+        experiment_name = f"principled_layer_selection_exp{exp_num}"
+        
+        # Run analysis
+        results = analyzer.run_comprehensive_analysis(
+            dataset, layer_start=layer_start, layer_end=layer_end,
+            dataset_name=dataset_name, experiment_name=experiment_name
+        )
+        composite_scores = analyzer.compute_composite_scores(results)
+        ranking = analyzer.generate_layer_ranking(composite_scores)
+        
+        return {
+            'dataset': dataset,
+            'results': results,
+            'composite_scores': composite_scores,
+            'ranking': ranking,
+            'exp_num': exp_num,
+            'exp_name': exp_name
+        }
+    except Exception as e:
+        print(f"  Error: {e}")
+        return None
+
+
+def print_experiment_summary(exp_num: int, exp_name: str, ranking: List[Tuple]):
+    """Print a brief summary for an experiment."""
+    if not ranking:
+        return
+    best_layer, best_score, _ = ranking[0]
+    print(f"  Experiment {exp_num} ({exp_name}): Best layer = {best_layer} (score: {best_score:.4f})")
+
+
+def analyze_correlations(all_experiment_results):
+    """
+    Analyze correlations between different experiments.
+    
+    Args:
+        all_experiment_results: List of experiment result dictionaries
+    
+    Returns:
+        Dictionary mapping experiment names to layer scores
+    """
+    # Extract overall scores for each experiment
+    experiment_scores = {}
+    
+    for exp_data in all_experiment_results:
+        if exp_data is None:
+            continue
+        exp_name = exp_data['exp_name']
+        composite_scores = exp_data['composite_scores']
+        layer_scores = {}
+        for layer_idx, scores in composite_scores.items():
+            layer_scores[layer_idx] = scores['overall_score']
+        experiment_scores[exp_name] = layer_scores
+    
+    if len(experiment_scores) < 2:
+        return experiment_scores
+    
+    # Compute pairwise correlations
+    from scipy.stats import spearmanr, pearsonr
+    
+    print("\nCorrelation Analysis:")
+    print(f"{'Exp 1':<20} {'Exp 2':<20} {'Pearson r':<12} {'Spearman ρ':<12}")
+    print("-" * 70)
+    
+    exp_names = list(experiment_scores.keys())
+    for i, exp1 in enumerate(exp_names):
+        for exp2 in exp_names[i+1:]:
+            scores1 = [experiment_scores[exp1][layer] for layer in sorted(experiment_scores[exp1].keys())]
+            scores2 = [experiment_scores[exp2][layer] for layer in sorted(experiment_scores[exp2].keys())]
+            
+            pearson_r, _ = pearsonr(scores1, scores2)
+            spearman_r, _ = spearmanr(scores1, scores2)
+            
+            print(f"{exp1:<20} {exp2:<20} {pearson_r:>10.4f}   {spearman_r:>10.4f}")
+    
+    # Find top layers for each experiment
+    print("\nTop 3 Layers by Experiment:")
+    for exp_name, layer_scores in experiment_scores.items():
+        sorted_layers = sorted(layer_scores.items(), key=lambda x: x[1], reverse=True)
+        top_3 = sorted_layers[:3]
+        layer_str = ", ".join([f"L{layer}" for layer, _ in top_3])
+        print(f"  {exp_name:<20} {layer_str}")
+    
+    return experiment_scores
+
+
+def create_correlation_visualization(all_experiment_results, analyzer=None):
+    """
+    Create visualization comparing results across experiments.
+    
+    Args:
+        all_experiment_results: List of experiment result dictionaries
+        analyzer: LayerDiscriminativeAnalyzer instance for model naming
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        # Extract overall scores
+        experiment_scores = {}
+        for exp_data in all_experiment_results:
+            if exp_data is None:
+                continue
+            exp_name = exp_data['exp_name']
+            composite_scores = exp_data['composite_scores']
+            layer_scores = {}
+            for layer_idx, scores in composite_scores.items():
+                layer_scores[layer_idx] = scores['overall_score']
+            experiment_scores[exp_name] = layer_scores
+        
+        if len(experiment_scores) == 0:
+            print("No experiment results available for visualization")
+            return
+        
+        # Create figure with subplots
+        n_experiments = len(experiment_scores)
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('Robustness Experiments: Layer Selection Comparison', fontsize=16, fontweight='bold')
+        
+        # Plot 1: Overall scores by layer (all experiments)
+        ax1 = axes[0, 0]
+        for exp_name, layer_scores in experiment_scores.items():
+            layers = sorted(layer_scores.keys())
+            scores = [layer_scores[layer] for layer in layers]
+            ax1.plot(layers, scores, 'o-', label=exp_name.replace('_', ' ').title(), linewidth=2, markersize=4)
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('Overall Discriminative Score')
+        ax1.set_title('Overall Scores by Layer (All Experiments)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Correlation heatmap
+        ax2 = axes[0, 1]
+        if len(experiment_scores) >= 2:
+            from scipy.stats import pearsonr
+            exp_names = list(experiment_scores.keys())
+            corr_matrix = np.zeros((len(exp_names), len(exp_names)))
+            
+            for i, exp1 in enumerate(exp_names):
+                for j, exp2 in enumerate(exp_names):
+                    scores1 = [experiment_scores[exp1][layer] for layer in sorted(experiment_scores[exp1].keys())]
+                    scores2 = [experiment_scores[exp2][layer] for layer in sorted(experiment_scores[exp2].keys())]
+                    corr, _ = pearsonr(scores1, scores2)
+                    corr_matrix[i, j] = corr
+            
+            im = ax2.imshow(corr_matrix, cmap='coolwarm', vmin=-1, vmax=1, aspect='auto')
+            ax2.set_xticks(range(len(exp_names)))
+            ax2.set_yticks(range(len(exp_names)))
+            ax2.set_xticklabels([name.replace('_', ' ').title() for name in exp_names], rotation=45, ha='right')
+            ax2.set_yticklabels([name.replace('_', ' ').title() for name in exp_names])
+            ax2.set_title('Correlation Matrix (Pearson r)')
+            
+            # Add text annotations
+            for i in range(len(exp_names)):
+                for j in range(len(exp_names)):
+                    text = ax2.text(j, i, f'{corr_matrix[i, j]:.3f}',
+                                   ha="center", va="center", color="black", fontweight='bold')
+            
+            plt.colorbar(im, ax=ax2)
+        
+        # Plot 3: Top 10 layers comparison
+        ax3 = axes[1, 0]
+        top_n = 10
+        for exp_name, layer_scores in experiment_scores.items():
+            sorted_layers = sorted(layer_scores.items(), key=lambda x: x[1], reverse=True)
+            top_layers = [layer for layer, _ in sorted_layers[:top_n]]
+            top_scores = [score for _, score in sorted_layers[:top_n]]
+            
+            x_pos = np.arange(len(top_layers))
+            ax3.bar(x_pos - 0.2 * (list(experiment_scores.keys()).index(exp_name) - len(experiment_scores)/2 + 0.5),
+                   top_scores, width=0.2, label=exp_name.replace('_', ' ').title(), alpha=0.7)
+        
+        ax3.set_xlabel('Rank Position')
+        ax3.set_ylabel('Overall Score')
+        ax3.set_title(f'Top {top_n} Layers Comparison')
+        ax3.set_xticks(range(top_n))
+        ax3.set_xticklabels([f'{i+1}' for i in range(top_n)])
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Score distribution histograms
+        ax4 = axes[1, 1]
+        for exp_name, layer_scores in experiment_scores.items():
+            scores = list(layer_scores.values())
+            ax4.hist(scores, bins=15, alpha=0.5, label=exp_name.replace('_', ' ').title(), edgecolor='black')
+        ax4.set_xlabel('Overall Discriminative Score')
+        ax4.set_ylabel('Frequency')
+        ax4.set_title('Score Distribution Histograms')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        os.makedirs('results', exist_ok=True)
+        if analyzer:
+            model_name = analyzer._get_model_name_for_filename()
+            output_path = f"results/experiments_correlation_{model_name}.png"
+        else:
+            output_path = "results/experiments_correlation.png"
+        
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Visualization saved to: {output_path}")
+        
+        # Try to show plot
+        try:
+            plt.show()
+        except:
+            pass
+        
+    except Exception as e:
+        print(f"Error creating correlation visualization: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def parse_experiment_numbers(experiment_arg: Optional[str]) -> List[int]:
+    """
+    Parse experiment numbers from command line argument.
+    
+    Args:
+        experiment_arg: Comma-separated string of experiment numbers (e.g., "1,2,3")
+    
+    Returns:
+        List of experiment numbers (1-5)
+    """
+    if experiment_arg is None:
+        return [1, 2, 3, 4, 5]  # Default: run all experiments
+    
+    try:
+        exp_nums = [int(x.strip()) for x in experiment_arg.split(',')]
+        # Validate experiment numbers
+        valid_nums = [n for n in exp_nums if 1 <= n <= 5]
+        if not valid_nums:
+            raise ValueError("No valid experiment numbers (must be 1-5)")
+        return sorted(set(valid_nums))  # Remove duplicates and sort
+    except ValueError as e:
+        print(f"Error parsing experiment numbers: {e}")
+        print("Use comma-separated numbers, e.g., '1,2,3' or '1,3,5'")
+        sys.exit(1)
+
+
+def save_experiment_results(exp_data: Dict, model_name: str):
+    """Save experiment results to CSV file in the same format as the original."""
+    if exp_data is None:
+        return None
+    
+    ranking = exp_data['ranking']
+    exp_name = exp_data['exp_name']
+    exp_num = exp_data['exp_num']
+    
+    # Use naming scheme similar to original: principled_layer_selection_results_{exp_name}_{model_name}.csv
+    # For experiment 1 (original SGXSTest), use the original naming
+    if exp_num == 1:
+        output_path = f"results/principled_layer_selection_results_{model_name}.csv"
+    else:
+        output_path = f"results/principled_layer_selection_results_{exp_name}_{model_name}.csv"
+    
+    csv_data = []
+    for rank, (layer_idx, overall_score, detailed_scores) in enumerate(ranking, 1):
+        row = {
+            'Rank': rank,
+            'Layer': layer_idx,
+            'Overall_Score': f"{overall_score:.4f}",
+            'Distributional_Score': f"{detailed_scores['distributional_score']:.4f}",
+            'Geometric_Score': f"{detailed_scores['geometric_score']:.4f}",
+            'Information_Score': f"{detailed_scores['information_score']:.4f}",
+            'MMD': f"{detailed_scores['mmd']:.4f}",
+            'Wasserstein': f"{detailed_scores['wasserstein']:.4f}",
+            'KL_Divergence': f"{detailed_scores['kl_divergence']:.4f}",
+            'SVM_Margin': f"{detailed_scores['svm_margin']:.4f}",
+            'Silhouette': f"{detailed_scores['silhouette']:.4f}",
+            'Distance_Ratio': f"{detailed_scores['distance_ratio']:.4f}",
+            'Mutual_Info': f"{detailed_scores['mutual_info']:.4f}",
+            'Entropy_Reduction': f"{detailed_scores['entropy_reduction']:.4f}"
+        }
+        csv_data.append(row)
+    
+    df = pd.DataFrame(csv_data)
+    os.makedirs('results', exist_ok=True)
+    df.to_csv(output_path, index=False)
+    return output_path
+
+
 def main():
     """
     Main function to run principled layer selection analysis.
     """
     import sys
 
-    print("="*100)
-    print("PRINCIPLED LAYER SELECTION FOR JAILBREAK DETECTION")
-    print("="*100)
-    print("This script analyzes the discriminative power of different model layers")
-    print("for detecting jailbreaking attempts using comprehensive metrics.")
-    print("="*100)
-
-    # Configuration - explicit model type (no fallbacks)
-    if len(sys.argv) < 3:
-        print("Usage: python principled_layer_selection.py <model_type> <model_path>")
+    # Parse command line arguments
+    if len(sys.argv) < 2:
+        print("Usage: python principled_layer_selection.py <model_type> [model_path] [experiments]")
         print("  model_type: qwen | llava | internvl")
-        print("  model_path: path to the model directory")
+        print("  model_path: (optional) path to the model directory")
+        print("             If not provided, auto-detects from model/ directory")
+        print("  experiments: comma-separated experiment numbers (1-4), default: all")
+        print("    1 = SGXSTest (original paired dataset)")
+        print("    2 = Noisy Distribution (random unmatched samples)")
+        print("    3 = Latent Neighbor (synthetic pairs via embedding)")
+        print("    4 = In-the-Wild (actual training split)")
+        print("    5 = XSTest (similar to SGXSTest but used in training)")
         sys.exit(1)
 
     model_type = sys.argv[1].lower()
-    model_path = sys.argv[2]
+    
+    # Validate model type
+    if model_type not in MODEL_PATHS:
+        print(f"Error: Unknown model type '{model_type}'. Use one of: {list(MODEL_PATHS.keys())}")
+        sys.exit(1)
+    
+    # Auto-detect model path if not provided
+    # Check if second argument looks like a path (contains '/' or exists as directory)
+    if len(sys.argv) >= 3:
+        potential_path = sys.argv[2]
+        # If it contains '/' or exists as a directory, treat it as model_path
+        if '/' in potential_path or os.path.exists(potential_path):
+            model_path = potential_path
+            experiment_arg = sys.argv[3] if len(sys.argv) > 3 else None
+        else:
+            # Second argument is experiment numbers, auto-detect model path
+            model_path = MODEL_PATHS[model_type]
+            experiment_arg = sys.argv[2]
+    else:
+        # No second argument, auto-detect model path and use default experiments
+        model_path = MODEL_PATHS[model_type]
+        experiment_arg = None
+    
+    # Verify model path exists
+    if not os.path.exists(model_path):
+        print(f"Error: Model directory not found: {model_path}")
+        print(f"Please download the model using download_models.py or provide the model path manually")
+        sys.exit(1)
+    
+    print(f"Using model: {model_type} at {model_path}")
+    
+    # Parse experiment numbers
+    exp_nums = parse_experiment_numbers(experiment_arg)
+    print(f"Running experiments: {exp_nums}")
 
     # Initialize analyzer
-    print(f"\nInitializing analyzer for model: {model_path}")
     analyzer = LayerDiscriminativeAnalyzer(model_path, model_type)
-
-    # Get dynamic layer range based on model
     layer_start, layer_end = analyzer.get_model_layer_range()
-    print(f"Using layer range: {layer_start}-{layer_end} ({layer_end - layer_start + 1} layers)")
+    print(f"Layer range: {layer_start}-{layer_end} ({layer_end - layer_start + 1} layers)")
 
-    # Load SGXSTest dataset
-    print(f"\n--- Loading SGXSTest Dataset ---")
-    dataset = analyzer.load_sgxstest_dataset()
+    # Run selected experiments
+    all_experiment_results = []
+    
+    for exp_num in exp_nums:
+        exp_result = run_single_experiment(analyzer, exp_num, layer_start, layer_end)
+        all_experiment_results.append(exp_result)
+        
+        if exp_result is not None:
+            print_experiment_summary(exp_num, exp_result['exp_name'], exp_result['ranking'])
 
-    if not dataset:
-        print("❌ Error: Could not load dataset. Exiting.")
-        raise RuntimeError("Failed to load required dataset")
+    # Save results
+    model_name = analyzer._get_model_name_for_filename()
+    saved_files = []
+    for exp_data in all_experiment_results:
+        if exp_data is not None:
+            output_path = save_experiment_results(exp_data, model_name)
+            if output_path:
+                saved_files.append(output_path)
 
-    # Verify dataset balance
-    benign_count = sum(1 for s in dataset if s['toxicity'] == 0)
-    malicious_count = sum(1 for s in dataset if s['toxicity'] == 1)
-
-    if benign_count == 0 or malicious_count == 0:
-        print(f"❌ Error: Dataset is not balanced (benign: {benign_count}, malicious: {malicious_count})")
-        raise RuntimeError(f"Dataset is not balanced: benign={benign_count}, malicious={malicious_count}")
-
-    print(f"Dataset loaded successfully:")
-    print(f"  Total samples: {len(dataset)}")
-    print(f"  Benign samples: {benign_count}")
-    print(f"  Malicious samples: {malicious_count}")
-    print(f"  Balance ratio: {benign_count/malicious_count:.2f}:1")
-
-    # Run comprehensive analysis
-    try:
-        layer_results = analyzer.run_comprehensive_analysis(
-            dataset, layer_start=layer_start, layer_end=layer_end
-        )
-
-        # Compute composite scores
-        composite_scores = analyzer.compute_composite_scores(layer_results)
-
-        # Generate ranking
-        ranking = analyzer.generate_layer_ranking(composite_scores)
-
-        # Print comprehensive report
-        analyzer.print_summary_report(ranking)
-
-        # Print detailed rankings for all metrics
-        analyzer.print_detailed_rankings(composite_scores)
-
-        # Save detailed results
-        analyzer.save_results(ranking)
-
-        # Additional analysis: Create visualization if matplotlib is available
+    # Correlation analysis if multiple experiments completed
+    if len([r for r in all_experiment_results if r is not None]) >= 2:
+        experiment_scores = analyze_correlations(all_experiment_results)
+        
+        # Create visualization
         try:
-            create_visualization(ranking, composite_scores, analyzer)
-        except ImportError:
-            print("\nNote: Install matplotlib and seaborn for visualization features")
+            create_correlation_visualization(all_experiment_results, analyzer)
         except Exception as e:
-            print(f"\nWarning: Could not create visualization: {e}")
+            print(f"Warning: Could not create visualization: {e}")
 
-        print(f"\n" + "="*100)
-        print("ANALYSIS COMPLETE")
-        print("="*100)
-        print(f"✓ Analyzed {layer_end - layer_start + 1} layers using {len(dataset)} paired samples")
-        print(f"✓ Recommended layer: {ranking[0][0]} (score: {ranking[0][1]:.4f})")
-
-        # Show the actual filename that was saved
-        model_name = analyzer._get_model_name_for_filename()
-        print(f"✓ Detailed results saved to: principled_layer_selection_results_{model_name}.csv")
-        print(f"✓ Use the recommended layer in your jailbreak detection pipeline")
-        print("="*100)
-
-    except Exception as e:
-        print(f"\n❌ Critical error during analysis: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+    # Summary
+    print(f"\nCompleted {len([r for r in all_experiment_results if r is not None])}/{len(exp_nums)} experiments")
+    if saved_files:
+        print(f"\nResults saved:")
+        for file_path in saved_files:
+            print(f"  - {file_path}")
 
 
 def create_visualization(ranking: List[Tuple], composite_scores: Dict, analyzer=None):

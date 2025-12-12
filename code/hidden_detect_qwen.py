@@ -15,7 +15,7 @@ import os
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from load_datasets import *
-from generic_classifier import FeatureCache
+from feature_cache import FeatureCache
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore", message=".*copying from a non-meta parameter in the checkpoint to a meta parameter.*")

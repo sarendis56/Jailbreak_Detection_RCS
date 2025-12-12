@@ -13,7 +13,7 @@ from torchvision.transforms.functional import InterpolationMode
 
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 
-from generic_classifier import FeatureCache
+from feature_cache import FeatureCache
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)

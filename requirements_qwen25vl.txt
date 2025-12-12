@@ -1,6 +1,5 @@
-# Core ML libraries
-torch>=2.0.0
-torchvision
+torch>=2.8.0
+torchvision>=0.23.0
 torchaudio
 
 # Transformers and Qwen-specific

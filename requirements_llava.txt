@@ -1,8 +1,5 @@
-# Core ML libraries
-# For RTX 5090, this may not work. 
-# Our setups are Python 3.10.18, PyTorch 2.8.0, Cuda 12.8, and torchvision 0.23.0. Update accordingly. 
-torch>=2.1.2
-torchvision>=0.16.2
+torch>=2.8.0
+torchvision>=0.23.0
 
 # Transformers and LLaVA-specific
 transformers>=4.37.2

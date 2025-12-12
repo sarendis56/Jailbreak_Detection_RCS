@@ -5,6 +5,7 @@ import warnings
 import signal
 import sys
 import os
+from scipy.linalg import inv
 from sklearn.metrics import accuracy_score, roc_curve, precision_recall_curve, auc, f1_score, confusion_matrix
 import torch
 import torch.nn as nn
@@ -19,9 +20,76 @@ warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
 warnings.filterwarnings("ignore", message=".*Palette images with Transparency.*")
 
 from load_datasets import *
+from feature_cache import FeatureCache
+from profiling_utils import PerformanceProfiler, save_profiling_results
+from llava.mm_utils import tokenizer_image_token
+from llava.constants import IMAGE_TOKEN_INDEX
 
 # Smart import handling based on command line arguments and available dependencies
 import sys
+
+# ============================================================================
+# GLOBAL CONFIGURATION
+# ============================================================================
+class ProjectionConfig:
+    """Global configuration for projection training methods"""
+
+    # Projection training mode
+    # "single_layer": Train one projection on layer 16, use for all layers (original method)
+    # "layer_specific": Train separate projection for each layer (new method)
+    PROJECTION_MODE = "layer_specific"  # Change this to switch modes
+
+    # Single layer mode settings
+    SINGLE_LAYER_TRAINING_LAYER = 18  # Which layer to use for training projection
+
+    # Training hyperparameters
+    PROJECTION_EPOCHS = 100
+    PROJECTION_BATCH_SIZE = 64
+    PROJECTION_LEARNING_RATE = 1e-3
+    PROJECTION_LR_SCHEDULER = 'cosine'
+    PROJECTION_STEP_SIZE = 25
+    PROJECTION_GAMMA = 0.5
+    PROJECTION_COSINE_MIN_LR_FACTOR = 0.05
+    PROJECTION_MAX_PATIENCE = 15
+
+    # Architecture settings (will be set dynamically based on model)
+    INPUT_DIM = 4096  # Default for LLaVA/InternVL, will be updated for Qwen (2048)
+    OUTPUT_DIM = 256
+    HIDDEN_DIM = 512
+    DROPOUT = 0.3
+
+    # Loss weighting settings
+    DATASET_LOSS_WEIGHT = 1.0      # Weight for dataset classification loss
+    TOXICITY_LOSS_WEIGHT = 5.0     # Weight for toxicity detection loss (higher to balance magnitude)
+
+    @classmethod
+    def set_model_dimensions(cls, model_type, input_dim=None):
+        """Set input dimensions based on model type and actual feature dimensions"""
+        if model_type.lower() == 'qwen':
+            # Use actual input dimension if provided, otherwise use default
+            cls.INPUT_DIM = input_dim if input_dim is not None else 2048
+            cls.OUTPUT_DIM = 256  # Reduce output dimension for Qwen
+            cls.HIDDEN_DIM = 512  # Reduce hidden dimension for Qwen
+            cls.PROJECTION_EPOCHS = 100  # Reduce epochs for Qwen
+        else:
+            # Use actual input dimension if provided, otherwise use default
+            cls.INPUT_DIM = input_dim if input_dim is not None else 4096
+
+    @classmethod
+    def print_config(cls):
+        """Print current configuration"""
+        print("="*80)
+        print("PROJECTION CONFIGURATION")
+        print("="*80)
+        print(f"Mode: {cls.PROJECTION_MODE}")
+        if cls.PROJECTION_MODE == "single_layer":
+            print(f"Training layer: {cls.SINGLE_LAYER_TRAINING_LAYER}")
+        print(f"Architecture: {cls.INPUT_DIM} -> {cls.HIDDEN_DIM} -> {cls.OUTPUT_DIM}")
+        print(f"Training: {cls.PROJECTION_EPOCHS} epochs, batch_size={cls.PROJECTION_BATCH_SIZE}")
+        print(f"Learning rate: {cls.PROJECTION_LEARNING_RATE} (scheduler={cls.PROJECTION_LR_SCHEDULER}, "
+              f"cosine_factor={cls.PROJECTION_COSINE_MIN_LR_FACTOR}, step_size={cls.PROJECTION_STEP_SIZE}, gamma={cls.PROJECTION_GAMMA})")
+        print(f"Loss weights: Dataset={cls.DATASET_LOSS_WEIGHT}, Toxicity={cls.TOXICITY_LOSS_WEIGHT}")
+        print("="*80)
 
 def detect_model_from_args():
     """Detect model type from command line arguments"""
@@ -38,6 +106,77 @@ def detect_model_from_args():
 
 # Determine which model we're using
 REQUESTED_MODEL = detect_model_from_args()
+
+def parse_requested_layers():
+    """Parse optional --layers argument (comma-separated indices)."""
+    layer_arg = None
+    arg_names = {"--layers", "--layer-indices", "--layer_subset"}
+
+    for idx, arg in enumerate(sys.argv):
+        if arg in arg_names:
+            if idx + 1 < len(sys.argv):
+                layer_arg = sys.argv[idx + 1]
+            else:
+                print("Warning: --layers flag provided without a value. Ignoring.")
+            break
+        elif any(arg.startswith(name + "=") for name in arg_names):
+            for name in arg_names:
+                prefix = f"{name}="
+                if arg.startswith(prefix):
+                    layer_arg = arg[len(prefix):]
+                    break
+            break
+
+    if not layer_arg:
+        return None
+
+    try:
+        layers = sorted(set(int(part.strip()) for part in layer_arg.split(",") if part.strip() != ""))
+    except ValueError:
+        print(f"Warning: Invalid --layers specification '{layer_arg}'. Ignoring.")
+        return None
+
+    if not layers:
+        print("Warning: --layers list empty after parsing. Using default layer range.")
+        return None
+
+    return layers
+
+REQUESTED_LAYERS = parse_requested_layers()
+
+def parse_token_strategy():
+    """Parse optional --token-strategy argument."""
+    default_strategy = 'last_token'
+    arg_names = {"--token-strategy", "--token_strategy"}
+    valid_strategies = {'last_token', 'mean_pool', 'last_5_tokens'}
+    selected_strategy = default_strategy
+
+    for idx, arg in enumerate(sys.argv):
+        if arg in arg_names:
+            if idx + 1 < len(sys.argv):
+                candidate = sys.argv[idx + 1].lower()
+                if candidate in valid_strategies:
+                    selected_strategy = candidate
+                else:
+                    print(f"Warning: Invalid token strategy '{candidate}'. Using default '{default_strategy}'.")
+            else:
+                print(f"Warning: {arg} flag provided without a value. Using default '{default_strategy}'.")
+            break
+        elif any(arg.startswith(name + "=") for name in arg_names):
+            for name in arg_names:
+                prefix = f"{name}="
+                if arg.startswith(prefix):
+                    candidate = arg[len(prefix):].lower()
+                    if candidate in valid_strategies:
+                        selected_strategy = candidate
+                    else:
+                        print(f"Warning: Invalid token strategy '{candidate}'. Using default '{default_strategy}'.")
+                    break
+            break
+
+    return selected_strategy
+
+TOKEN_STRATEGY = parse_token_strategy()
 
 # Import appropriate dependencies based on requested model
 if REQUESTED_MODEL == 'qwen':
@@ -82,73 +221,9 @@ def get_model_specific_extractor(model_path, model_type):
     # we can just use it directly
     return HiddenStateExtractor(model_path)
 
-# ============================================================================
-# GLOBAL CONFIGURATION
-# ============================================================================
-class ProjectionConfig:
-    """Global configuration for projection training methods"""
-
-    # Projection training mode
-    # "single_layer": Train one projection on layer 16, use for all layers (original method)
-    # "layer_specific": Train separate projection for each layer (new method)
-    PROJECTION_MODE = "layer_specific"  # Change this to switch modes
-
-    # Single layer mode settings
-    SINGLE_LAYER_TRAINING_LAYER = 16  # Which layer to use for training projection
-
-    # Training hyperparameters
-    PROJECTION_EPOCHS = 100
-    PROJECTION_BATCH_SIZE = 64
-    PROJECTION_LEARNING_RATE = 1e-3
-    PROJECTION_LR_SCHEDULER = 'cosine'
-    PROJECTION_MAX_PATIENCE = 15
-
-    # Architecture settings (will be set dynamically based on model)
-    INPUT_DIM = 4096  # Default for LLaVA/InternVL, will be updated for Qwen (2048)
-    OUTPUT_DIM = 256
-    HIDDEN_DIM = 512
-    DROPOUT = 0.3
-
-    # Loss weighting settings
-    DATASET_LOSS_WEIGHT = 1.0      # Weight for dataset classification loss
-    TOXICITY_LOSS_WEIGHT = 5.0     # Weight for toxicity detection loss (higher to balance magnitude)
-
-    @classmethod
-    def set_model_dimensions(cls, model_type, input_dim=None):
-        """Set input dimensions based on model type and actual feature dimensions"""
-        if model_type.lower() == 'qwen':
-            # Use actual input dimension if provided, otherwise use default
-            cls.INPUT_DIM = input_dim if input_dim is not None else 2048
-            cls.OUTPUT_DIM = 256  # Reduce output dimension for Qwen
-            cls.HIDDEN_DIM = 512  # Reduce hidden dimension for Qwen
-            cls.PROJECTION_EPOCHS = 100  # Reduce epochs for Qwen
-        elif model_type.lower() == 'internvl':
-            # Use actual input dimension if provided, otherwise use default
-            cls.INPUT_DIM = input_dim if input_dim is not None else 4096
-            cls.OUTPUT_DIM = 256  # Same as LLaVA for InternVL
-            cls.HIDDEN_DIM = 512  # Same as LLaVA for InternVL
-            cls.PROJECTION_EPOCHS = 100  # Same as LLaVA for InternVL
-        else:
-            # Use actual input dimension if provided, otherwise use default
-            cls.INPUT_DIM = input_dim if input_dim is not None else 4096
-
-    @classmethod
-    def print_config(cls):
-        """Print current configuration"""
-        print("="*80)
-        print("PROJECTION CONFIGURATION")
-        print("="*80)
-        print(f"Mode: {cls.PROJECTION_MODE}")
-        if cls.PROJECTION_MODE == "single_layer":
-            print(f"Training layer: {cls.SINGLE_LAYER_TRAINING_LAYER}")
-        print(f"Architecture: {cls.INPUT_DIM} -> {cls.HIDDEN_DIM} -> {cls.OUTPUT_DIM}")
-        print(f"Training: {cls.PROJECTION_EPOCHS} epochs, batch_size={cls.PROJECTION_BATCH_SIZE}")
-        print(f"Learning rate: {cls.PROJECTION_LEARNING_RATE} ({cls.PROJECTION_LR_SCHEDULER} scheduler)")
-        print(f"Loss weights: Dataset={cls.DATASET_LOSS_WEIGHT}, Toxicity={cls.TOXICITY_LOSS_WEIGHT}")
-        print("="*80)
-
 # Global config instance
 CONFIG = ProjectionConfig()
+CACHE_EXPERIMENT_NAME = "balanced_ml_detection"
 
 def setup_gpu_environment():
     if torch.cuda.is_available():
@@ -171,6 +246,7 @@ def setup_gpu_environment():
         print("CUDA not available, falling back to CPU")
         return torch.device('cpu')
 
+# Initialize GPU
 GPU_DEVICE = setup_gpu_environment()
 
 def cleanup_gpu_memory():
@@ -187,14 +263,15 @@ def get_gpu_memory_info():
         return f"GPU Memory: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved"
     return "GPU not available"
 
-
 class LearnedProjection(nn.Module):
     """
-    Learned projection from 4096 to 256 dimensions with multi-objective loss:
+    Learned projection from input_dim to 256 dimensions with multi-objective loss:
     1. Samples from same dataset should be close
     2. Samples from different datasets should be far
     3. Benign centroids should be close, malicious centroids should be close,
        but benign and malicious centroids should be far apart
+
+    Input dimensions: 4096 for LLaVA/InternVL, 2048 for Qwen
     """
 
     def __init__(self, input_dim=None, output_dim=None, hidden_dim=None, dropout=None):
@@ -237,9 +314,269 @@ class LearnedProjection(nn.Module):
         """Forward pass through projection network"""
         return self.projection(x)
 
+def train_learned_projection(features_dict, labels_dict, input_dim=None, output_dim=None,
+                           epochs=None, batch_size=None, learning_rate=None, device=None,
+                           lr_scheduler=None, random_seed=42):
+    """
+    Train the learned projection network
+
+    Args:
+        features_dict: Dict of {dataset_name: features_array}
+        labels_dict: Dict of {dataset_name: labels_array}
+        input_dim: Input feature dimension (4096 for LLaVA/InternVL, 2048 for Qwen)
+        output_dim: Output feature dimension (256)
+        epochs: Number of training epochs
+        batch_size: Training batch size
+        learning_rate: Initial learning rate
+        device: GPU device
+        lr_scheduler: Learning rate scheduler type ('cosine' or 'step')
+        random_seed: Random seed for reproducibility
+
+    Returns:
+        trained_model: Trained projection model
+        dataset_name_to_id: Mapping of dataset names to IDs
+    """
+    input_dim = input_dim or CONFIG.INPUT_DIM
+    output_dim = output_dim or CONFIG.OUTPUT_DIM
+    epochs = epochs or CONFIG.PROJECTION_EPOCHS
+    batch_size = batch_size or CONFIG.PROJECTION_BATCH_SIZE
+    learning_rate = learning_rate or CONFIG.PROJECTION_LEARNING_RATE
+    lr_scheduler = lr_scheduler or CONFIG.PROJECTION_LR_SCHEDULER
+
+    if device is None:
+        device = GPU_DEVICE
+
+    torch.manual_seed(random_seed)
+    torch.cuda.manual_seed(random_seed)
+    torch.cuda.manual_seed_all(random_seed)
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    print(f"Training learned projection: {input_dim} -> {output_dim} dimensions")
+    print(f"Device: {device}, Epochs: {epochs}, Batch size: {batch_size}, LR: {learning_rate}")
+    print(f"Random seed: {random_seed} (deterministic mode enabled)")
+
+    all_features = []
+    all_dataset_labels = []
+    all_toxicity_labels = []
+    dataset_name_to_id = {}
+
+    dataset_id = 0
+    for dataset_name, features in features_dict.items():
+        if dataset_name not in labels_dict:
+            continue
+
+        features_array = np.array(features)
+        labels_array = np.array(labels_dict[dataset_name])
+
+        if len(features_array) != len(labels_array):
+            print(f"Warning: Feature-label mismatch for {dataset_name}: {len(features_array)} vs {len(labels_array)}")
+            continue
+
+        # Assign dataset ID
+        if dataset_name not in dataset_name_to_id:
+            dataset_name_to_id[dataset_name] = dataset_id
+            dataset_id += 1
+
+        all_features.append(features_array)
+        all_dataset_labels.extend([dataset_name_to_id[dataset_name]] * len(features_array))
+        all_toxicity_labels.extend(labels_array.tolist())
+
+    all_features = np.vstack(all_features)
+    all_dataset_labels = np.array(all_dataset_labels)
+    all_toxicity_labels = np.array(all_toxicity_labels)
+
+    actual_input_dim = all_features.shape[1]
+    if input_dim is None or input_dim != actual_input_dim:
+        print(f"Updating input dimension from {input_dim} to {actual_input_dim} based on actual features")
+        input_dim = actual_input_dim
+
+    features_tensor = torch.FloatTensor(all_features).to(device)
+    dataset_labels_tensor = torch.LongTensor(all_dataset_labels).to(device)
+    toxicity_labels_tensor = torch.LongTensor(all_toxicity_labels).to(device)
+
+    dataset = TensorDataset(features_tensor, dataset_labels_tensor, toxicity_labels_tensor)
+
+    generator = torch.Generator()
+    generator.manual_seed(random_seed)
+
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True,
+                          generator=generator, worker_init_fn=lambda worker_id: np.random.seed(random_seed + worker_id))
+
+    model = LearnedProjection(input_dim=input_dim, output_dim=output_dim).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(random_seed)
+
+    step_size = CONFIG.PROJECTION_STEP_SIZE
+    gamma = CONFIG.PROJECTION_GAMMA
+    cosine_eta_min = learning_rate * CONFIG.PROJECTION_COSINE_MIN_LR_FACTOR
+    scheduler_name = (lr_scheduler or CONFIG.PROJECTION_LR_SCHEDULER or 'cosine').lower()
+
+    if scheduler_name == 'step':
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+        print(f"Using Step LR scheduler (step_size={step_size}, gamma={gamma})")
+        scheduler_log_interval = max(step_size, 1)
+    elif scheduler_name == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=epochs,
+            eta_min=cosine_eta_min
+        )
+        print(f"Using Cosine Annealing LR scheduler (T_max={epochs}, eta_min={cosine_eta_min:.6f})")
+        scheduler_log_interval = max(epochs // 5, 1)
+    else:
+        print(f"Warning: Unknown scheduler '{scheduler_name}'. Falling back to Cosine Annealing.")
+        scheduler_name = 'cosine'
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=epochs,
+            eta_min=cosine_eta_min
+        )
+        scheduler_log_interval = max(epochs // 5, 1)
+
+    plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=CONFIG.PROJECTION_MAX_PATIENCE)
+
+    model.train()
+    best_loss = float('inf')
+    patience_counter = 0
+    max_patience = 20
+    prev_lr = learning_rate
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        epoch_dataset_loss = 0.0
+        epoch_toxicity_loss = 0.0
+        num_batches = 0
+
+        for batch_features, batch_dataset_labels, batch_toxicity_labels in dataloader:
+            optimizer.zero_grad()
+
+            # Forward pass
+            embeddings = model(batch_features)
+
+            # Compute loss
+            total_loss, dataset_loss, toxicity_loss = compute_contrastive_loss(
+                embeddings, batch_dataset_labels, batch_toxicity_labels
+            )
+
+            # Backward pass
+            total_loss.backward()
+
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            optimizer.step()
+
+            # Accumulate losses
+            epoch_loss += total_loss.item()
+            epoch_dataset_loss += dataset_loss if isinstance(dataset_loss, (int, float)) else dataset_loss.item()
+            epoch_toxicity_loss += toxicity_loss if isinstance(toxicity_loss, (int, float)) else toxicity_loss.item()
+            num_batches += 1
+
+        # Average losses
+        avg_loss = epoch_loss / num_batches
+        avg_dataset_loss = epoch_dataset_loss / num_batches
+        avg_toxicity_loss = epoch_toxicity_loss / num_batches
+
+        # Learning rate scheduling
+        scheduler.step()
+
+        # Also apply plateau scheduler for adaptive reduction
+        plateau_scheduler.step(avg_loss)
+
+        # Print progress with learning rate information
+        current_lr = optimizer.param_groups[0]['lr']
+        if (epoch + 1) % 30 == 0 or epoch == 0:
+            # Calculate weighted components for display
+            weighted_dataset = CONFIG.DATASET_LOSS_WEIGHT * avg_dataset_loss
+            weighted_toxicity = CONFIG.TOXICITY_LOSS_WEIGHT * avg_toxicity_loss
+            print(f"Epoch {epoch+1}/{epochs}: Loss={avg_loss:.4f} "
+                  f"(Dataset={avg_dataset_loss:.4f}*{CONFIG.DATASET_LOSS_WEIGHT}={weighted_dataset:.4f}, "
+                  f"Toxicity={avg_toxicity_loss:.4f}*{CONFIG.TOXICITY_LOSS_WEIGHT}={weighted_toxicity:.4f}), "
+                  f"LR={current_lr:.6f}")
+
+        # Log learning rate changes periodically
+        if (epoch > 0 and abs(current_lr - prev_lr) > 1e-8 and
+                ((epoch + 1) % scheduler_log_interval == 0 or epoch == epochs - 1)):
+            print(f"  Learning rate changed: {prev_lr:.6f} -> {current_lr:.6f}")
+        prev_lr = current_lr
+
+        # Early stopping
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        if patience_counter >= max_patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+    print(f"Training completed. Best loss: {best_loss:.4f}")
+
+    model.eval()
+
+    return model, dataset_name_to_id
+
+def apply_learned_projection(model, features_dict, device=None):
+    """
+    Apply the learned projection to transform features to 256 dimensions
+
+    Args:
+        model: Trained projection model
+        features_dict: Dict of {dataset_name: features_array}
+        device: GPU device
+
+    Returns:
+        projected_features_dict: Dict of {dataset_name: projected_features_array}
+    """
+    if device is None:
+        device = GPU_DEVICE
+
+    model.eval()
+    projected_features_dict = {}
+
+    # print("Applying learned projection to features...")
+
+    with torch.no_grad():
+        for dataset_name, features in features_dict.items():
+            features_array = np.array(features)
+            # print(f"  Projecting {dataset_name}: {features_array.shape} -> ", end="")
+
+            # Convert to tensor and project in batches to manage memory
+            batch_size = 1000
+            projected_features = []
+
+            for i in range(0, len(features_array), batch_size):
+                batch_features = features_array[i:i+batch_size]
+                batch_tensor = torch.FloatTensor(batch_features).to(device)
+
+                # Apply projection
+                batch_projected = model(batch_tensor)
+                projected_features.append(batch_projected.cpu().numpy())
+
+                # Clean up GPU memory
+                del batch_tensor, batch_projected
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Combine batches
+            projected_features = np.vstack(projected_features)
+            projected_features_dict[dataset_name] = projected_features
+
+            # print(f"{projected_features.shape}")
+
+    return projected_features_dict
 
 def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
-                           margin_dataset=1.0, margin_toxicity=2.0):
+                           margin_dataset=1.0, margin_toxicity=2.0,
+                           temperature=0.1):
     """
     Compute multi-objective contrastive loss:
     1. Dataset clustering: same dataset samples close, different dataset samples far
@@ -253,7 +590,7 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
     embeddings = F.normalize(embeddings, p=2, dim=1)
 
     # 1. Dataset clustering loss
-    dataset_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    dataset_loss = 0.0
     unique_datasets = torch.unique(dataset_labels)
 
     if len(unique_datasets) > 1:
@@ -332,474 +669,347 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
 
     return total_loss, dataset_loss, toxicity_loss
 
+def compute_optimal_shrinkage(X, sample_cov):
+    """Compute optimal shrinkage intensity using Ledoit-Wolf formula"""
+    n, d = X.shape
 
-def train_learned_projection(features_dict, labels_dict, input_dim=None, output_dim=None,
-                           epochs=None, batch_size=None, learning_rate=None, device=None,
-                           lr_scheduler=None, random_seed=42):
-    """
-    Train the learned projection network
+    if n <= 1:
+        return 1.0  # Full shrinkage for very small samples
 
-    Args:
-        features_dict: Dict of {dataset_name: features_array}
-        labels_dict: Dict of {dataset_name: labels_array}
-        input_dim: Input feature dimension (4096)
-        output_dim: Output feature dimension (256)
-        epochs: Number of training epochs
-        batch_size: Training batch size
-        learning_rate: Initial learning rate
-        device: GPU device
-        lr_scheduler: Learning rate scheduler type ('cosine', 'exponential', 'step')
-        random_seed: Random seed for reproducibility
+    # Center the data
+    X_centered = X - np.mean(X, axis=0)
 
-    Returns:
-        trained_model: Trained projection model
-        dataset_name_to_id: Mapping of dataset names to IDs
-    """
-    # Use config defaults if not specified
-    input_dim = input_dim or CONFIG.INPUT_DIM
-    output_dim = output_dim or CONFIG.OUTPUT_DIM
-    epochs = epochs or CONFIG.PROJECTION_EPOCHS
-    batch_size = batch_size or CONFIG.PROJECTION_BATCH_SIZE
-    learning_rate = learning_rate or CONFIG.PROJECTION_LEARNING_RATE
-    lr_scheduler = lr_scheduler or CONFIG.PROJECTION_LR_SCHEDULER
+    # Compute trace of sample covariance
+    trace_cov = np.trace(sample_cov)
 
-    if device is None:
-        device = GPU_DEVICE
-
-    # Set random seeds for reproducibility
-    torch.manual_seed(random_seed)
-    torch.cuda.manual_seed(random_seed)
-    torch.cuda.manual_seed_all(random_seed)
-    np.random.seed(random_seed)
-    random.seed(random_seed)
-
-    # Ensure deterministic behavior
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-    print(f"Training learned projection: {input_dim} -> {output_dim} dimensions")
-    print(f"Device: {device}, Epochs: {epochs}, Batch size: {batch_size}, LR: {learning_rate}")
-    print(f"Random seed: {random_seed} (deterministic mode enabled)")
-
-    # Prepare training data
-    all_features = []
-    all_dataset_labels = []
-    all_toxicity_labels = []
-    dataset_name_to_id = {}
-
-    dataset_id = 0
-    for dataset_name, features in features_dict.items():
-        if dataset_name not in labels_dict:
-            continue
-
-        features_array = np.array(features)
-        labels_array = np.array(labels_dict[dataset_name])
-
-        if len(features_array) != len(labels_array):
-            print(f"Warning: Feature-label mismatch for {dataset_name}: {len(features_array)} vs {len(labels_array)}")
-            continue
-
-        # Assign dataset ID
-        if dataset_name not in dataset_name_to_id:
-            dataset_name_to_id[dataset_name] = dataset_id
-            dataset_id += 1
-
-        all_features.append(features_array)
-        all_dataset_labels.extend([dataset_name_to_id[dataset_name]] * len(features_array))
-        all_toxicity_labels.extend(labels_array.tolist())
-
-        print(f"  {dataset_name}: {len(features_array)} samples, dataset_id={dataset_name_to_id[dataset_name]}")
-
-    # Convert to tensors
-    all_features = np.vstack(all_features)
-    all_dataset_labels = np.array(all_dataset_labels)
-    all_toxicity_labels = np.array(all_toxicity_labels)
-
-    print(f"Total training samples: {len(all_features)}")
-    print(f"Feature shape: {all_features.shape}")
-    print(f"Unique datasets: {len(dataset_name_to_id)}")
-    print(f"Toxicity distribution: {np.bincount(all_toxicity_labels)}")
-
-    # Update input_dim based on actual feature dimensions if not explicitly provided
-    actual_input_dim = all_features.shape[1]
-    if input_dim is None or input_dim != actual_input_dim:
-        print(f"Updating input dimension from {input_dim} to {actual_input_dim} based on actual features")
-        input_dim = actual_input_dim
-
-    # Create data loader
-    features_tensor = torch.FloatTensor(all_features).to(device)
-    dataset_labels_tensor = torch.LongTensor(all_dataset_labels).to(device)
-    toxicity_labels_tensor = torch.LongTensor(all_toxicity_labels).to(device)
-
-    dataset = TensorDataset(features_tensor, dataset_labels_tensor, toxicity_labels_tensor)
-
-    # Create deterministic generator for DataLoader
-    generator = torch.Generator()
-    generator.manual_seed(random_seed)
-
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True,
-                          generator=generator, worker_init_fn=lambda worker_id: np.random.seed(random_seed + worker_id))
-
-    # Initialize model
-    model = LearnedProjection(input_dim=input_dim, output_dim=output_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-
-    # Multiple learning rate schedulers for better training dynamics
-    # 1. Cosine annealing for smooth decay
-    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=learning_rate*0.01)
-    # 2. ReduceLROnPlateau for adaptive reduction when loss plateaus
-    plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15)
-    # 3. Exponential decay for consistent reduction
-    exp_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
-    # 4. Step decay
-    step_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
-
-    # Select scheduler based on parameter
-    if lr_scheduler == 'cosine':
-        scheduler = cosine_scheduler
-        print(f"Using Cosine Annealing LR scheduler (eta_min={learning_rate*0.01:.6f})")
-    elif lr_scheduler == 'exponential':
-        scheduler = exp_scheduler
-        print(f"Using Exponential LR scheduler (gamma=0.98)")
-    elif lr_scheduler == 'step':
-        scheduler = step_scheduler
-        print(f"Using Step LR scheduler (step_size=30, gamma=0.5)")
+    # Estimate optimal shrinkage intensity
+    # This is a simplified version of the Ledoit-Wolf formula
+    if n < d:
+        # When n < d, use stronger shrinkage
+        lambda_opt = min(1.0, (d - n) / (d + n))
     else:
-        scheduler = cosine_scheduler  # Default
-        print(f"Using default Cosine Annealing LR scheduler")
+        # Standard Ledoit-Wolf shrinkage estimation
+        # Simplified formula for computational efficiency
+        lambda_opt = min(1.0, (d / n) * 0.1)
 
-    # Training loop
-    model.train()
-    best_loss = float('inf')
-    patience_counter = 0
-    max_patience = 15
-    prev_lr = learning_rate  # Initialize for learning rate change tracking
+    return lambda_opt
 
-    for epoch in range(epochs):
-        epoch_loss = 0.0
-        epoch_dataset_loss = 0.0
-        epoch_toxicity_loss = 0.0
-        num_batches = 0
+def enhanced_ledoit_wolf_covariance(X, min_samples=50):
+    """Enhanced Ledoit-Wolf covariance estimator with minimum sample size validation"""
+    n, d = X.shape
 
-        for batch_features, batch_dataset_labels, batch_toxicity_labels in dataloader:
-            optimizer.zero_grad()
+    if n <= 1:
+        raise ValueError(f"Cannot compute covariance with only {n} sample(s). Need at least 2 samples.")
 
-            # Forward pass
-            embeddings = model(batch_features)
+    if n < min_samples:
+        raise ValueError(
+            f"Cluster has only {n} samples, which is below the minimum required {min_samples} samples. "
+            f"This is insufficient for reliable covariance estimation. "
+            f"Consider: (1) collecting more data, (2) using fewer/broader clusters, or "
+            f"(3) reducing min_samples if you understand the risks."
+        )
 
-            # Compute loss
-            total_loss, dataset_loss, toxicity_loss = compute_contrastive_loss(
-                embeddings, batch_dataset_labels, batch_toxicity_labels
-            )
+    # Step 1: Compute sample covariance
+    sample_cov = np.cov(X.T, bias=False)
 
-            # Backward pass
-            total_loss.backward()
+    # Step 2: Compute shrinkage target (scaled identity)
+    trace_cov = np.trace(sample_cov)
+    target = (trace_cov / d) * np.eye(d)
 
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    # Step 3: Enhanced shrinkage intensity (more conservative for small samples)
+    lambda_opt = compute_optimal_shrinkage(X, sample_cov)
+    if n < min_samples:
+        lambda_opt = max(0.2, lambda_opt)  # Minimum 20% shrinkage for small samples
 
-            optimizer.step()
+    # Step 4: Shrunk estimator
+    shrunk_cov = (1 - lambda_opt) * sample_cov + lambda_opt * target
 
-            # Accumulate losses
-            epoch_loss += total_loss.item()
-            epoch_dataset_loss += dataset_loss if isinstance(dataset_loss, (int, float)) else dataset_loss.item()
-            epoch_toxicity_loss += toxicity_loss if isinstance(toxicity_loss, (int, float)) else toxicity_loss.item()
-            num_batches += 1
+    return shrunk_cov
 
-        # Average losses
-        avg_loss = epoch_loss / num_batches
-        avg_dataset_loss = epoch_dataset_loss / num_batches
-        avg_toxicity_loss = epoch_toxicity_loss / num_batches
+def ledoit_wolf_covariance(X):
+    """Original Ledoit-Wolf covariance estimator"""
+    return enhanced_ledoit_wolf_covariance(X, min_samples=50)
 
-        # Learning rate scheduling
-        scheduler.step()  # Cosine annealing doesn't need loss parameter
-
-        # Also apply plateau scheduler for adaptive reduction
-        plateau_scheduler.step(avg_loss)
-
-        # Print progress with learning rate information
-        current_lr = optimizer.param_groups[0]['lr']
-        if (epoch + 1) % 30 == 0 or epoch == 0:
-            # Calculate weighted components for display
-            weighted_dataset = CONFIG.DATASET_LOSS_WEIGHT * avg_dataset_loss
-            weighted_toxicity = CONFIG.TOXICITY_LOSS_WEIGHT * avg_toxicity_loss
-            print(f"Epoch {epoch+1}/{epochs}: Loss={avg_loss:.4f} "
-                  f"(Dataset={avg_dataset_loss:.4f}*{CONFIG.DATASET_LOSS_WEIGHT}={weighted_dataset:.4f}, "
-                  f"Toxicity={avg_toxicity_loss:.4f}*{CONFIG.TOXICITY_LOSS_WEIGHT}={weighted_toxicity:.4f}), "
-                  f"LR={current_lr:.6f}")
-
-        # Log learning rate changes
-        if epoch > 0 and abs(current_lr - prev_lr) > 1e-8 and epoch % 30 == 0:
-            print(f"  Learning rate changed: {prev_lr:.6f} -> {current_lr:.6f}")
-        prev_lr = current_lr
-
-        # Early stopping
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-
-        if patience_counter >= max_patience:
-            print(f"Early stopping at epoch {epoch+1}")
-            break
-
-    print(f"Training completed. Best loss: {best_loss:.4f}")
-
-    # Set model to evaluation mode
-    model.eval()
-
-    return model, dataset_name_to_id
-
-
-def apply_learned_projection(model, features_dict, device=None):
-    """
-    Apply the learned projection to transform features from 4096 to 256 dimensions
-
-    Args:
-        model: Trained projection model
-        features_dict: Dict of {dataset_name: features_array}
-        device: GPU device
-
-    Returns:
-        projected_features_dict: Dict of {dataset_name: projected_features_array}
-    """
+def enhanced_ledoit_wolf_covariance_gpu(X, min_samples=50, device=None):
+    """GPU-accelerated Enhanced Ledoit-Wolf covariance estimator with minimum sample size validation"""
     if device is None:
         device = GPU_DEVICE
 
-    model.eval()
-    projected_features_dict = {}
+    n, d = X.shape
+    # print(f"    GPU covariance computation: {n} samples, {d} dimensions")
 
-    print("Applying learned projection to features...")
+    if n <= 1:
+        raise ValueError(f"Cannot compute covariance with only {n} sample(s). Need at least 2 samples.")
 
-    with torch.no_grad():
-        for dataset_name, features in features_dict.items():
-            features_array = np.array(features)
-            print(f"  Projecting {dataset_name}: {features_array.shape} -> ", end="")
+    if n < min_samples:
+        raise ValueError(
+            f"Cluster has only {n} samples, which is below the minimum required {min_samples} samples. "
+            f"This is insufficient for reliable covariance estimation. "
+            f"Consider: (1) collecting more data, (2) using fewer/broader clusters, or "
+            f"(3) reducing min_samples if you understand the risks."
+        )
 
-            # Convert to tensor and project in batches to manage memory
-            batch_size = 1000
-            projected_features = []
+    # Convert to GPU tensor (use float64 for numerical consistency with CPU)
+    X_gpu = torch.tensor(X, dtype=torch.float64, device=device)
 
-            for i in range(0, len(features_array), batch_size):
-                batch_features = features_array[i:i+batch_size]
-                batch_tensor = torch.FloatTensor(batch_features).to(device)
+    # GPU covariance computation
+    X_centered = X_gpu - torch.mean(X_gpu, dim=0, keepdim=True)
+    sample_cov_gpu = torch.matmul(X_centered.T, X_centered) / (n - 1)
 
-                # Apply projection
-                batch_projected = model(batch_tensor)
-                projected_features.append(batch_projected.cpu().numpy())
+    # Shrinkage target (scaled identity)
+    trace_cov = torch.trace(sample_cov_gpu)
+    target_gpu = (trace_cov / d) * torch.eye(d, device=device)
 
-                # Clean up GPU memory
-                del batch_tensor, batch_projected
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+    # Enhanced shrinkage intensity (match CPU implementation exactly)
+    # Convert back to CPU for shrinkage calculation to ensure consistency
+    sample_cov_cpu = sample_cov_gpu.cpu().numpy()
+    X_cpu = X_gpu.cpu().numpy()
+    lambda_opt = compute_optimal_shrinkage(X_cpu, sample_cov_cpu)
+    if n < min_samples:
+        lambda_opt = max(0.2, lambda_opt)  # Minimum 20% shrinkage for small samples
 
-            # Combine batches
-            projected_features = np.vstack(projected_features)
-            projected_features_dict[dataset_name] = projected_features
+    # Shrunk estimator
+    shrunk_cov_gpu = (1 - lambda_opt) * sample_cov_gpu + lambda_opt * target_gpu
 
-            print(f"{projected_features.shape}")
+    # Move back to CPU as numpy array
+    return shrunk_cov_gpu.cpu().numpy()
 
-    return projected_features_dict
-
-def euclidean_distance_batch_gpu(X, Y, device=None):
-    """GPU-accelerated batch Euclidean distance computation between X and Y"""
+def compute_matrix_inverse_gpu(matrix, device=None):
+    """GPU-accelerated matrix inversion with fallback"""
     if device is None:
         device = GPU_DEVICE
 
     try:
-        # Convert inputs to GPU tensors (use float32 for memory efficiency)
-        X_gpu = torch.tensor(X, dtype=torch.float32, device=device)
-        Y_gpu = torch.tensor(Y, dtype=torch.float32, device=device)
+        # Convert to GPU tensor (use float64 for numerical consistency)
+        matrix_gpu = torch.tensor(matrix, dtype=torch.float64, device=device)
 
-        # Ensure proper dimensions
+        # GPU matrix inversion using Cholesky decomposition for stability
+        try:
+            # Try Cholesky first (faster for positive definite matrices)
+            L = torch.linalg.cholesky(matrix_gpu)
+            inv_gpu = torch.cholesky_inverse(L)
+        except:
+            # Fallback to general inverse
+            inv_gpu = torch.linalg.inv(matrix_gpu)
+
+        # Move back to CPU
+        return inv_gpu.cpu().numpy()
+
+    except Exception as e:
+        print(f"    GPU matrix inversion failed: {e}, using CPU pseudo-inverse")
+        return np.linalg.pinv(matrix)
+
+def mahalanobis_distance_batch_gpu(X, mean, cov_inv, device=None):
+    """GPU-accelerated batch Mahalanobis distance computation"""
+    if device is None:
+        device = GPU_DEVICE
+
+    try:
+        # Convert inputs to GPU tensors (use float64 for numerical consistency)
+        X_gpu = torch.tensor(X, dtype=torch.float64, device=device)
+        mean_gpu = torch.tensor(mean, dtype=torch.float64, device=device)
+        cov_inv_gpu = torch.tensor(cov_inv, dtype=torch.float64, device=device)
+
+        # Compute differences (broadcasting)
         if X_gpu.dim() == 1:
             X_gpu = X_gpu.unsqueeze(0)  # Add batch dimension
-        if Y_gpu.dim() == 1:
-            Y_gpu = Y_gpu.unsqueeze(0)  # Add batch dimension
 
-        # Compute pairwise Euclidean distances
-        # X: (n_samples, n_features), Y: (n_training, n_features)
-        # Result: (n_samples, n_training)
-        distances = torch.cdist(X_gpu, Y_gpu, p=2)
+        diff = X_gpu - mean_gpu.unsqueeze(0)  # Shape: (batch_size, feature_dim)
+
+        # Batch Mahalanobis distance: sqrt((x-μ)ᵀ Σ⁻¹ (x-μ))
+        # result = diff @ cov_inv @ diff.T, but we want diagonal elements
+        temp = torch.matmul(diff, cov_inv_gpu)  # Shape: (batch_size, feature_dim)
+        distances_squared = torch.sum(temp * diff, dim=1)  # Element-wise multiply and sum
+        distances = torch.sqrt(torch.clamp(distances_squared, min=0))
 
         # Move back to CPU
         return distances.cpu().numpy()
 
     except Exception as e:
-        print(f"    GPU Euclidean distance failed: {e}, using CPU fallback")
+        print(f"    GPU Mahalanobis distance failed: {e}, using CPU fallback")
         # CPU fallback
         if X.ndim == 1:
             X = X.reshape(1, -1)
-        if Y.ndim == 1:
-            Y = Y.reshape(1, -1)
 
         distances = []
         for x in X:
-            row_distances = []
-            for y in Y:
-                dist = np.linalg.norm(x - y)
-                row_distances.append(dist)
-            distances.append(row_distances)
+            diff = x - mean
+            try:
+                result = np.dot(diff, cov_inv)
+                result = np.dot(result, diff)
+                distances.append(np.sqrt(max(0, result)))
+            except:
+                distances.append(np.linalg.norm(diff))
 
         return np.array(distances)
 
-class KCDDetector:
-    """
-    Contrastive K-Nearest Neighbors (KNN) based jailbreak detection.
+class MCDDetector:
 
-    This implements an improved KNN algorithm that uses BOTH benign and malicious samples:
-    1. Uses L2-normalized features (critical for performance)
-    2. Computes contrastive score: distance_to_malicious - distance_to_benign
-    3. Leverages both classes for better decision boundary learning
-    4. Enhanced with GPU acceleration for distance computation
-    """
-
-    def __init__(self, k, use_gpu=True, normalization=True):
-        """
-        Initialize KCD detector.
-
-        Args:
-            k: Number of nearest neighbors (50 for small datasets like ours)
-            use_gpu: Whether to use GPU acceleration for distance computation
-            normalization: Whether to L2-normalize features (critical - always True)
-        """
-        self.k = k
-        self.normalization = normalization
+    def __init__(self, use_gpu=True):
+        self.in_distribution_clusters = {}  # {cluster_name: {'mean': ..., 'cov_inv': ...}}
+        self.ood_clusters = {}  # {attack_type: {'mean': ..., 'cov_inv': ...}}
         self.threshold = 0.0
-        self.benign_features = None
-        self.malicious_features = None
         self.use_gpu = use_gpu and torch.cuda.is_available()
-
         if self.use_gpu:
-            print(f"    KCDDetector initialized with GPU acceleration on {GPU_DEVICE}")
+            print(f"    MCDDetector initialized with GPU acceleration on {GPU_DEVICE}")
         else:
-            print("    KCDDetector initialized with CPU computation")
-
-        print(f"    Hyperparameters: k={self.k}, normalization={self.normalization}")
-
-    def _normalize_features(self, features):
-        """L2 normalize features - critical for KNN performance"""
-        if not self.normalization:
-            return features
-
+            print("    MCDDetector initialized with CPU computation")
+        
+    def _compute_cluster_stats(self, features):
+        """Compute mean and inverse covariance for a cluster of features using GPU-accelerated Ledoit-Wolf shrinkage"""
         features = np.array(features)
-        if features.ndim == 1:
-            features = features.reshape(1, -1)
+        mean = np.mean(features, axis=0)
 
-        # L2 normalization
-        norms = np.linalg.norm(features, axis=1, keepdims=True)
-        norms[norms == 0] = 1  # Avoid division by zero
-        return features / norms
+        # print(f"    Computing covariance for {len(features)} samples, {features.shape[1]} dims...")
 
-    def _euclidean_distance_batch(self, X, Y):
-        """Batch Euclidean distance computation with GPU acceleration"""
         if self.use_gpu:
-            return euclidean_distance_batch_gpu(X, Y)
+            # GPU-accelerated computation
+            try:
+                cov = enhanced_ledoit_wolf_covariance_gpu(features)
+                cov_inv = compute_matrix_inverse_gpu(cov)
+                # print(f"    Successfully computed GPU Ledoit-Wolf covariance inverse")
+            except Exception as e:
+                print(f"    GPU computation failed: {e}, falling back to CPU")
+                cov = ledoit_wolf_covariance(features)
+                cov_inv = inv(cov)
+                # print(f"    Successfully computed CPU Ledoit-Wolf covariance inverse")
         else:
-            # CPU batch computation using broadcasting
-            if X.ndim == 1:
-                X = X.reshape(1, -1)
-            if Y.ndim == 1:
-                Y = Y.reshape(1, -1)
+            # CPU computation
+            try:
+                cov = ledoit_wolf_covariance(features)
+                cov_inv = inv(cov)
+                # print(f"    Successfully computed CPU Ledoit-Wolf covariance inverse")
+            except np.linalg.LinAlgError as e:
+                # error out
+                raise ValueError(f"    Error computing covariance: {e}, using identity")
+            except Exception as e:
+                print(f"    Error computing covariance: {e}, using identity")
+                cov_inv = np.eye(features.shape[1])
 
-            # Compute pairwise distances using broadcasting
-            # X: (n_samples, n_features), Y: (n_training, n_features)
-            # Result: (n_samples, n_training)
-            X_expanded = X[:, np.newaxis, :]  # (n_samples, 1, n_features)
-            Y_expanded = Y[np.newaxis, :, :]  # (1, n_training, n_features)
-            distances = np.sqrt(np.sum((X_expanded - Y_expanded) ** 2, axis=2))
-            return distances
+        return mean, cov_inv
+    
+    def _mahalanobis_distance(self, x, mean, cov_inv):
+        """Compute Mahalanobis distance with GPU acceleration option"""
+        if self.use_gpu:
+            # Use GPU batch computation even for single sample
+            distances = mahalanobis_distance_batch_gpu(x.reshape(1, -1), mean, cov_inv)
+            return distances[0]
+        else:
+            # CPU computation
+            diff = x - mean
+            try:
+                # Use more stable computation
+                result = np.dot(diff, cov_inv)
+                result = np.dot(result, diff)
+                return np.sqrt(max(0, result))  # Ensure non-negative
+            except:
+                # Fallback to Euclidean distance if Mahalanobis fails
+                return np.linalg.norm(diff)
 
-    def fit_training_data(self, benign_data, malicious_data):
+    def _mahalanobis_distance_batch(self, X, mean, cov_inv):
+        """Batch Mahalanobis distance computation"""
+        if self.use_gpu:
+            return mahalanobis_distance_batch_gpu(X, mean, cov_inv)
+        else:
+            # CPU batch computation
+            distances = []
+            for x in X:
+                distances.append(self._mahalanobis_distance(x, mean, cov_inv))
+            return np.array(distances)
+    
+    def fit_in_distribution(self, in_dist_data):
         """
-        Fit KCD detector with both benign and malicious training data.
-
+        Fit in-distribution clusters.
+        
         Args:
-            benign_data: Dict of {dataset_name: list_of_features} for benign samples
-            malicious_data: Dict of {dataset_name: list_of_features} for malicious samples
+            in_dist_data: Dict of {cluster_name: list_of_features}
         """
-        print("Fitting KCD detector with both benign and malicious training data...")
-
-        # Process benign data
-        all_benign_features = []
-        benign_total = 0
-
-        for dataset_name, features in benign_data.items():
-            if len(features) > 0:
-                all_benign_features.extend(features)
-                benign_total += len(features)
-                print(f"  Benign {dataset_name}: {len(features)} samples")
+        # print("Fitting in-distribution clusters...")
+        for cluster_name, features in in_dist_data.items():
+            if len(features) > 1:  # Need at least 2 samples for covariance
+                mean, cov_inv = self._compute_cluster_stats(features)
+                self.in_distribution_clusters[cluster_name] = {
+                    'mean': mean,
+                    'cov_inv': cov_inv,
+                    'size': len(features)
+                }
+                # print(f"  {cluster_name}: {len(features)} samples, dim={len(mean)}")
             else:
-                print(f"  Warning: Benign {dataset_name} has no samples, skipping")
-
-        # Process malicious data
-        all_malicious_features = []
-        malicious_total = 0
-
-        for dataset_name, features in malicious_data.items():
-            if len(features) > 0:
-                all_malicious_features.extend(features)
-                malicious_total += len(features)
-                print(f"  Malicious {dataset_name}: {len(features)} samples")
+                print(f"  Warning: {cluster_name} has only {len(features)} samples, skipping")
+    
+    def fit_ood_clusters(self, ood_data):
+        """
+        Fit OOD clusters for different attack types.
+        
+        Args:
+            ood_data: Dict of {attack_type: list_of_features}
+        """
+        # print("Fitting OOD clusters...")
+        for attack_type, features in ood_data.items():
+            if len(features) > 1:  # Need at least 2 samples for covariance
+                mean, cov_inv = self._compute_cluster_stats(features)
+                self.ood_clusters[attack_type] = {
+                    'mean': mean,
+                    'cov_inv': cov_inv,
+                    'size': len(features)
+                }
+                # print(f"  {attack_type}: {len(features)} samples, dim={len(mean)}")
             else:
-                print(f"  Warning: Malicious {dataset_name} has no samples, skipping")
-
-        if benign_total == 0:
-            raise ValueError("No benign training data provided!")
-        if malicious_total == 0:
-            raise ValueError("No malicious training data provided!")
-
-        # Convert to numpy arrays and normalize
-        self.benign_features = np.array(all_benign_features)
-        self.benign_features = self._normalize_features(self.benign_features)
-
-        self.malicious_features = np.array(all_malicious_features)
-        self.malicious_features = self._normalize_features(self.malicious_features)
-
-        print(f"  Total benign training samples: {len(self.benign_features)}")
-        print(f"  Total malicious training samples: {len(self.malicious_features)}")
-        print(f"  Feature dimension: {self.benign_features.shape[1]}")
-
-    def compute_kcd_score(self, x):
+                print(f"  Warning: {attack_type} has only {len(features)} samples, skipping")
+    
+    def _compute_min_in_dist_distance(self, x):
+        """Compute minimum Mahalanobis distance to any in-distribution cluster"""
+        if not self.in_distribution_clusters:
+            return float('inf')
+            
+        min_distance = float('inf')
+        for cluster_name, cluster_stats in self.in_distribution_clusters.items():
+            distance = self._mahalanobis_distance(x, cluster_stats['mean'], cluster_stats['cov_inv'])
+            min_distance = min(min_distance, distance)
+        return min_distance
+    
+    def _compute_min_ood_distance(self, x):
+        """Compute minimum Mahalanobis distance to any OOD cluster"""
+        if not self.ood_clusters:
+            return float('inf')
+            
+        min_distance = float('inf')
+        for attack_type, cluster_stats in self.ood_clusters.items():
+            distance = self._mahalanobis_distance(x, cluster_stats['mean'], cluster_stats['cov_inv'])
+            min_distance = min(min_distance, distance)
+        return min_distance
+    
+    def compute_ood_score(self, x):
         """
-        Compute KCD outlier score for a sample.
+        Compute outlier score for a sample.
 
-        Score = distance_to_k_nearest_malicious - distance_to_k_nearest_benign
+        Score = D_mahal(x, Z_in) - D_mahal(x, Z_ood)
 
-        Intuition:
-        - If sample is benign: distance_to_benign is small, distance_to_malicious is large → negative score
-        - If sample is malicious: distance_to_benign is large, distance_to_malicious is small → positive score
-
-        Higher scores indicate more likely to be malicious (jailbreak).
+        Higher scores indicate more likely to be OOD (jailbreak).
         """
-        if self.benign_features is None or self.malicious_features is None:
-            raise ValueError("Detector not fitted! Call fit_training_data() first.")
+        in_dist_distance = self._compute_min_in_dist_distance(x)
+        ood_distance = self._compute_min_ood_distance(x)
 
-        # Normalize test sample
-        x_normalized = self._normalize_features(x.reshape(1, -1))
+        # Handle edge cases
+        if np.isinf(in_dist_distance) and np.isinf(ood_distance):
+            return 0.0
+        elif np.isinf(in_dist_distance):
+            return 1000.0  # Very likely OOD
+        elif np.isinf(ood_distance):
+            return -1000.0  # Very likely in-distribution
 
-        # Compute distances to benign training samples
-        benign_distances = self._euclidean_distance_batch(x_normalized, self.benign_features)
-        benign_distances = benign_distances.flatten()
-        benign_distances_sorted = np.sort(benign_distances)
-        kth_benign_distance = benign_distances_sorted[min(self.k - 1, len(benign_distances_sorted) - 1)]
+        # Compute contrastive score with numerical stability
+        score = in_dist_distance - ood_distance
 
-        # Compute distances to malicious training samples
-        malicious_distances = self._euclidean_distance_batch(x_normalized, self.malicious_features)
-        malicious_distances = malicious_distances.flatten()
-        malicious_distances_sorted = np.sort(malicious_distances)
-        kth_malicious_distance = malicious_distances_sorted[min(self.k - 1, len(malicious_distances_sorted) - 1)]
+        # Clip extreme values to prevent numerical issues
+        score = np.clip(score, -10000, 10000)
 
-        # Contrastive score: closer to malicious samples = higher score
-        contrastive_score = kth_benign_distance - kth_malicious_distance
-
-        return contrastive_score
-
+        return score
+    
     def fit_threshold(self, validation_features, validation_labels):
-        """Find optimal threshold using validation data"""
-        # Compute KCD scores for validation data
-        _, scores = self.predict(validation_features)
+        """Find optimal threshold using validation data with domain shift awareness"""
+        # Use batch computation for speed
+        _, scores = self.predict(validation_features)  # This uses batch computation
         validation_labels = np.array(validation_labels)
 
         # Check if we have both classes
@@ -812,7 +1022,7 @@ class KCDDetector:
         # Find threshold that maximizes balanced accuracy
         from sklearn.metrics import f1_score, balanced_accuracy_score
 
-        # Analyze score distributions
+        # Analyze score distributions to detect potential domain shift
         benign_scores = scores[validation_labels == 0]
         malicious_scores = scores[validation_labels == 1]
 
@@ -823,24 +1033,22 @@ class KCDDetector:
         separation = abs(malicious_mean - benign_mean) / (benign_std + malicious_std + 1e-8)
 
         print(f"  Validation score separation: {separation:.2f} (higher is better)")
-        print(f"  Benign scores: mean={benign_mean:.4f}, std={benign_std:.4f}")
-        print(f"  Malicious scores: mean={malicious_mean:.4f}, std={malicious_std:.4f}")
 
         # Use adaptive threshold range based on score distributions
-        if separation > 2.0:  # Well-separated distributions
+        if separation > 5.0:  # Well-separated distributions
             # Use narrow range around the midpoint
             midpoint = (benign_mean + malicious_mean) / 2
             range_width = min(benign_std, malicious_std) * 2
             score_range = [midpoint - range_width, midpoint + range_width]
-            print(f"  Using narrow threshold range around midpoint: [{score_range[0]:.4f}, {score_range[1]:.4f}]")
+            print(f"  Using narrow threshold range around midpoint: [{score_range[0]:.2f}, {score_range[1]:.2f}]")
         else:  # Overlapping distributions - use wider range
             score_range = np.percentile(scores, [5, 95])
             range_width = score_range[1] - score_range[0]
             score_range[0] -= 0.2 * range_width
             score_range[1] += 0.2 * range_width
-            print(f"  Using wide threshold range for overlapping distributions: [{score_range[0]:.4f}, {score_range[1]:.4f}]")
+            print(f"  Using wide threshold range for overlapping distributions: [{score_range[0]:.2f}, {score_range[1]:.2f}]")
 
-        thresholds = np.linspace(score_range[0], score_range[1], 200)
+        thresholds = np.linspace(score_range[0], score_range[1], 200)  # More granular search
         best_score = 0
         best_threshold = 0.0
         best_f1 = 0
@@ -849,8 +1057,11 @@ class KCDDetector:
         for threshold in thresholds:
             y_pred = (scores > threshold).astype(int)
             try:
+                # Use balanced accuracy as primary metric (handles class imbalance better)
                 balanced_acc = balanced_accuracy_score(validation_labels, y_pred)
                 f1 = f1_score(validation_labels, y_pred, zero_division=0)
+
+                # For domain shift robustness, prioritize balanced accuracy over F1
                 combined_score = 0.8 * balanced_acc + 0.2 * f1
 
                 if combined_score > best_score:
@@ -865,49 +1076,56 @@ class KCDDetector:
 
         self.threshold = best_threshold
         return best_threshold
-
+    
     def predict(self, features):
-        """Predict whether samples are OOD (jailbreak) using KCD"""
-        if len(features) > 100:  # Use batch processing for larger datasets
-            scores = self._compute_kcd_scores_batch(features)
+        """Predict whether samples are OOD (jailbreak) with GPU batch optimization"""
+        if self.use_gpu and len(features) > 10:  # Use batch processing for larger datasets
+            scores = self._compute_ood_scores_batch(features)
         else:
-            scores = np.array([self.compute_kcd_score(x) for x in features])
+            scores = np.array([self.compute_ood_score(x) for x in features])
         predictions = (scores > self.threshold).astype(int)
         return predictions, scores
 
-    def _compute_kcd_scores_batch(self, features):
-        """Batch KCD score computation with GPU acceleration"""
+    def _compute_ood_scores_batch(self, features):
+        """GPU-optimized batch OOD score computation"""
         features = np.array(features)
+        batch_size = len(features)
 
-        # Normalize all test features
-        features_normalized = self._normalize_features(features)
+        # Compute minimum distances to in-distribution clusters (batch)
+        in_dist_distances = np.full(batch_size, float('inf'))
+        for cluster_stats in self.in_distribution_clusters.values():
+            distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
+            in_dist_distances = np.minimum(in_dist_distances, distances)
 
-        # Compute distances to benign training samples (batch)
-        benign_distances = self._euclidean_distance_batch(features_normalized, self.benign_features)
-        # benign_distances shape: (n_test_samples, n_benign_training_samples)
+        # Compute minimum distances to OOD clusters (batch)
+        ood_distances = np.full(batch_size, float('inf'))
+        for cluster_stats in self.ood_clusters.values():
+            distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
+            ood_distances = np.minimum(ood_distances, distances)
 
-        # Compute distances to malicious training samples (batch)
-        malicious_distances = self._euclidean_distance_batch(features_normalized, self.malicious_features)
-        # malicious_distances shape: (n_test_samples, n_malicious_training_samples)
+        # Handle edge cases
+        scores = np.zeros(batch_size)
 
-        # For each test sample, compute contrastive score
-        scores = []
-        for i in range(len(features_normalized)):
-            # k-th nearest benign distance
-            benign_sample_distances = benign_distances[i]
-            benign_distances_sorted = np.sort(benign_sample_distances)
-            kth_benign_distance = benign_distances_sorted[min(self.k - 1, len(benign_distances_sorted) - 1)]
+        # Both infinite
+        both_inf = np.isinf(in_dist_distances) & np.isinf(ood_distances)
+        scores[both_inf] = 0.0
 
-            # k-th nearest malicious distance
-            malicious_sample_distances = malicious_distances[i]
-            malicious_distances_sorted = np.sort(malicious_sample_distances)
-            kth_malicious_distance = malicious_distances_sorted[min(self.k - 1, len(malicious_distances_sorted) - 1)]
+        # Only in_dist infinite
+        in_inf = np.isinf(in_dist_distances) & ~np.isinf(ood_distances)
+        scores[in_inf] = 1000.0
 
-            # Contrastive score
-            contrastive_score = kth_benign_distance - kth_malicious_distance
-            scores.append(contrastive_score)
+        # Only ood infinite
+        ood_inf = ~np.isinf(in_dist_distances) & np.isinf(ood_distances)
+        scores[ood_inf] = -1000.0
 
-        return np.array(scores)
+        # Normal case
+        normal = ~np.isinf(in_dist_distances) & ~np.isinf(ood_distances)
+        scores[normal] = in_dist_distances[normal] - ood_distances[normal]
+
+        # Clip extreme values
+        scores = np.clip(scores, -10000, 10000)
+
+        return scores
     
     def evaluate(self, test_features, test_labels):
         """Evaluate the detector on test data"""
@@ -955,7 +1173,6 @@ class KCDDetector:
             'threshold': self.threshold
         }
 
-
 def analyze_dataset_composition(dataset, dataset_name):
     """Analyze and report dataset composition"""
     total = len(dataset)
@@ -976,29 +1193,67 @@ def analyze_dataset_composition(dataset, dataset_name):
 
     return {'total': total, 'benign': benign, 'malicious': malicious, 'multimodal': has_images}
 
-
-def prepare_knn_data_structure(datasets_dict, hidden_states_dict, labels_dict):
-    benign_data = {}
-    malicious_data = {}
-
+def prepare_ood_data_structure(datasets_dict, hidden_states_dict, labels_dict):
+    in_dist_data = {}
+    ood_data = {}
+    
     for dataset_name in datasets_dict.keys():
         if dataset_name not in hidden_states_dict:
             continue
-
+            
         features = hidden_states_dict[dataset_name]
         labels = labels_dict[dataset_name]
-
+        
         # Separate benign and malicious samples
         benign_features = [features[i] for i, label in enumerate(labels) if label == 0]
         malicious_features = [features[i] for i, label in enumerate(labels) if label == 1]
-
+        
         if benign_features:
-            benign_data[f"{dataset_name}_benign"] = benign_features
+            in_dist_data[f"{dataset_name}_benign"] = benign_features
         if malicious_features:
-            malicious_data[f"{dataset_name}_malicious"] = malicious_features
+            ood_data[f"{dataset_name}_malicious"] = malicious_features
+    
+    return in_dist_data, ood_data
 
-    return benign_data, malicious_data
 
+def check_all_hidden_states_cached(datasets_dict, model_path, experiment_name):
+    """
+    Determine whether cached hidden states exist for every dataset with a consistent layer range.
+    Returns (all_cached, (layer_start, layer_end) or None).
+    """
+    cache = FeatureCache()
+    cached_layer_range = None
+
+    if not datasets_dict:
+        return False, None
+
+    for dataset_name, samples in datasets_dict.items():
+        dataset_size = len(samples)
+        if dataset_size == 0:
+            continue
+
+        cache_entry = cache.get_cache_entry(
+            dataset_name=dataset_name,
+            model_path=model_path,
+            dataset_size=dataset_size,
+            experiment_name=experiment_name
+        )
+
+        if cache_entry is None:
+            return False, None
+
+        layer_range = cache_entry.get('layer_range')
+        if layer_range is None or len(layer_range) != 2:
+            return False, None
+
+        layer_range = (layer_range[0], layer_range[1])
+        if cached_layer_range is None:
+            cached_layer_range = layer_range
+        elif layer_range != cached_layer_range:
+            print(f"Cache layer range mismatch for {dataset_name}: {layer_range} vs {cached_layer_range}. Recomputing features.")
+            return False, None
+
+    return True, cached_layer_range
 
 def signal_handler(sig, frame):
     print('\nInterrupted by user. Exiting...')
@@ -1197,16 +1452,11 @@ def prepare_balanced_evaluation():
     return test_datasets
 
 def main():
-    # Set up signal handler for graceful exit
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Support LLaVA, Qwen, and InternVL models
     import sys
 
-    # Use the model type already determined by detect_model_from_args()
     model_type = REQUESTED_MODEL
-    
-    # Set model path based on model type
     if model_type == 'qwen':
         model_path = "./model/qwen2.5-vl-7b-instruct"
     elif model_type == 'llava':
@@ -1217,47 +1467,24 @@ def main():
         print(f"Unknown model type: {model_type}. Use 'llava', 'qwen', or 'internvl'")
         sys.exit(1)
 
-    # Set random seed for reproducibility (use consistent seed)
-    MAIN_SEED = 42  # Match the seed used elsewhere in the script
+    MAIN_SEED = 45
     random.seed(MAIN_SEED)
     np.random.seed(MAIN_SEED)
     torch.manual_seed(MAIN_SEED)
     torch.cuda.manual_seed(MAIN_SEED)
     torch.cuda.manual_seed_all(MAIN_SEED)
 
-    # Ensure deterministic behavior for overall pipeline
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # Additional determinism settings
     os.environ['PYTHONHASHSEED'] = str(MAIN_SEED)
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # For deterministic CuBLAS operations
     torch.use_deterministic_algorithms(True, warn_only=True)
 
     print(f"Random seeds set for reproducibility (seed={MAIN_SEED})")
 
-    # Initialize model-specific feature extractor
-    extractor = get_model_specific_extractor(model_path, model_type)
-
-    # Get the layer range for this model
-    layer_start, layer_end = extractor.get_default_layer_range()
-    num_layers = layer_end - layer_start + 1
-    print(f"Model layer range: {layer_start}-{layer_end} ({num_layers} layers)")
-
-    # Set initial projection dimensions based on model type (will be updated after feature extraction)
     ProjectionConfig.set_model_dimensions(model_type)
 
-    print("="*80)
-    print(f"BALANCED OOD-BASED JAILBREAK DETECTION USING KCD WITH LAYER-SPECIFIC PROJECTIONS ({model_type.upper()})")
-    print("="*80)
-    print(f"Model: {model_path}")
-    print(f"Model type: {model_type}")
-    print("Approach: Use BOTH benign and malicious prompts for training")
-    print("          Compute contrastive score: distance_to_malicious - distance_to_benign")
-    print("          Apply L2 normalization and Euclidean distance")
-    print(f"          Enhanced with layer-specific projections: {ProjectionConfig.INPUT_DIM} -> {ProjectionConfig.OUTPUT_DIM} dimensions per layer")
-    print("          Multi-objective contrastive loss for optimal feature learning")
-    print("          Enhanced with GPU acceleration for distance computation")
     print("="*80)
     print("Training Set (2,000 examples, 1:1 ratio):")
     print("  - Benign (1,000): Alpaca (500) + MM-Vet (218) + OpenAssistant (282)")
@@ -1304,6 +1531,97 @@ def main():
     all_hidden_states = {}
     all_labels = {}
 
+    cache_ready, cached_layer_range = check_all_hidden_states_cached(
+        all_datasets, model_path, CACHE_EXPERIMENT_NAME
+    )
+
+    extractor = get_model_specific_extractor(model_path, model_type)
+
+    if cache_ready and cached_layer_range is not None:
+        layer_start, layer_end = cached_layer_range
+        print(f"All datasets found in cache for layers {layer_start}-{layer_end}. Skipping model loading.")
+    else:
+        layer_start, layer_end = extractor.get_default_layer_range()
+
+    num_layers = layer_end - layer_start + 1
+    print(f"Model layer range: {layer_start}-{layer_end} ({num_layers} layers)")
+
+    # Initialize profiler for feature extraction (only measure when actually extracting, not loading from cache)
+    feature_profiler = PerformanceProfiler()
+    
+    # Add baseline benchmark: measure base model forward pass on a small sample
+    print("\n=== Benchmarking Baseline Model Inference ===")
+    baseline_profiler = PerformanceProfiler()
+    
+    # Get a small sample for baseline benchmark (use first test dataset sample)
+    baseline_sample = None
+    for dataset_name, samples in test_datasets.items():
+        if samples and len(samples) > 0:
+            baseline_sample = samples[0]
+            break
+    
+    if baseline_sample is None:
+        # Fallback to training data
+        for dataset_name, samples in in_dist_datasets.items():
+            if samples and len(samples) > 0:
+                baseline_sample = samples[0]
+                break
+    
+    if baseline_sample:
+        # Load model if needed
+        if extractor.model is None:
+            extractor._load_model()
+        
+        if extractor.model is not None:
+            # Benchmark baseline: measure ONLY the forward pass (exclude data prep)
+            print(f"  Benchmarking baseline model forward pass (fair comparison)...")
+            num_baseline_runs = 10  # Run multiple times for average
+            
+            # Prepare input ONCE outside profiling (data prep overhead not included)
+            if baseline_sample['img'] == None:
+                prompt = extractor._construct_conv_prompt(baseline_sample)
+                input_ids = (
+                    tokenizer_image_token(prompt, extractor.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+                    .unsqueeze(0)
+                )
+                max_length = getattr(extractor.model.config, 'max_position_embeddings', 4096)
+                if input_ids.shape[1] > max_length:
+                    input_ids = input_ids[:, :max_length]
+                input_ids = input_ids.cuda()
+                images_tensor, images_size = None, None
+            else:
+                prompt = extractor._construct_conv_prompt(baseline_sample)
+                input_ids = (
+                    tokenizer_image_token(prompt, extractor.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+                    .unsqueeze(0)
+                )
+                max_length = getattr(extractor.model.config, 'max_position_embeddings', 4096)
+                if input_ids.shape[1] > max_length:
+                    input_ids = input_ids[:, :max_length]
+                input_ids = input_ids.cuda()
+                images_tensor, images_size = extractor._prepare_imgs_tensor_both_cases(baseline_sample)
+            
+            # Now profile ONLY the forward pass (fair comparison with MLP/detection)
+            with baseline_profiler.profile('baseline_forward_pass', num_samples=num_baseline_runs):
+                for _ in range(num_baseline_runs):
+                    with torch.no_grad():
+                        if images_tensor is not None:
+                            _ = extractor.model(input_ids, images=images_tensor, image_sizes=images_size, output_hidden_states=True)
+                        else:
+                            _ = extractor.model(input_ids, images=None, image_sizes=None, output_hidden_states=True)
+            
+            baseline_summary = baseline_profiler.get_summary('baseline_forward_pass')
+            if baseline_summary:
+                print(f"  Baseline forward pass: {baseline_summary['mean_time_seconds']*1000:.2f}ms per sample")
+                print(f"  Baseline GPU memory: {baseline_summary['peak_gpu_memory_mb']/1024:.3f}GB")
+            cleanup_gpu_memory()
+        else:
+            print("  Skipping baseline benchmark (model failed to load)")
+            baseline_profiler = None
+    else:
+        print("  Skipping baseline benchmark (no samples available)")
+        baseline_profiler = None
+    
     for dataset_name, samples in all_datasets.items():
         print(f"Extracting features for {dataset_name} ({len(samples)} samples)...")
 
@@ -1311,15 +1629,56 @@ def main():
         batch_size = 25 if len(samples) > 5000 else 50
         memory_cleanup_freq = 5 if len(samples) > 5000 else 10
 
-        hidden_states, labels, _ = extractor.extract_hidden_states(
-            samples, f"{dataset_name}", use_cache=True,
-            batch_size=batch_size, memory_cleanup_freq=memory_cleanup_freq,
-            experiment_name="balanced_ml_detection"
+        # Check if cached to determine if we should profile
+        cache_entry = extractor.cache.get_cache_entry(
+            dataset_name=dataset_name,
+            model_path=model_path,
+            dataset_size=len(samples),
+            experiment_name=CACHE_EXPERIMENT_NAME
         )
+        is_cached = cache_entry is not None
+        
+        # Profile feature extraction only if not cached (actual extraction)
+        if not is_cached:
+            with feature_profiler.profile('feature_extraction', num_samples=len(samples)):
+                hidden_states, labels, _ = extractor.extract_hidden_states(
+                    samples,
+                    f"{dataset_name}",
+                    layer_start=layer_start,
+                    layer_end=layer_end,
+                    use_cache=True,
+                    batch_size=batch_size,
+                    memory_cleanup_freq=memory_cleanup_freq,
+                    experiment_name=CACHE_EXPERIMENT_NAME,
+                    token_strategy=TOKEN_STRATEGY
+                )
+        else:
+            # Just load from cache (fast, no need to profile)
+            hidden_states, labels, _ = extractor.extract_hidden_states(
+                samples,
+                f"{dataset_name}",
+                layer_start=layer_start,
+                layer_end=layer_end,
+                use_cache=True,
+                batch_size=batch_size,
+                memory_cleanup_freq=memory_cleanup_freq,
+                experiment_name=CACHE_EXPERIMENT_NAME,
+                token_strategy=TOKEN_STRATEGY
+            )
         all_hidden_states[dataset_name] = hidden_states
         all_labels[dataset_name] = labels
 
     layers = list(range(layer_start, layer_end + 1))  # Use dynamic layer range
+    if REQUESTED_LAYERS:
+        filtered_layers = [layer for layer in REQUESTED_LAYERS if layer_start <= layer <= layer_end]
+        if not filtered_layers:
+            print(f"Warning: Requested layers {REQUESTED_LAYERS} are outside model range {layer_start}-{layer_end}. Using full range.")
+        else:
+            layers = filtered_layers
+            print(f"Restricting training/evaluation to requested layers: {layers}")
+            if CONFIG.PROJECTION_MODE == "single_layer" and CONFIG.SINGLE_LAYER_TRAINING_LAYER not in layers:
+                CONFIG.SINGLE_LAYER_TRAINING_LAYER = layers[0]
+                print(f"Adjusted SINGLE_LAYER_TRAINING_LAYER to {CONFIG.SINGLE_LAYER_TRAINING_LAYER} to align with requested layers.")
     layer_results = {}
 
     # Determine actual input dimension from extracted features
@@ -1388,7 +1747,7 @@ def main():
 
     elif CONFIG.PROJECTION_MODE == "layer_specific":
         print(f"\n=== Training Layer-Specific Projections ===")
-        print("Training separate projection models for each layer (0-31)")
+        print(f"Training separate projection models for each layer ({layer_start}-{layer_end})")
 
         for layer_idx in layers:
             print(f"\n--- Training Projection for Layer {layer_idx} ---")
@@ -1426,8 +1785,26 @@ def main():
     else:
         raise ValueError(f"Unknown projection mode: {CONFIG.PROJECTION_MODE}. Use 'single_layer' or 'layer_specific'")
 
+    # Initialize profiler for efficiency measurements
+    profiler = PerformanceProfiler()
+    profiling_output_path = f"results/efficiency_mcd_{model_type}.csv"
+    
+    # Store feature extraction profiling summary (measured once, shared across layers)
+    feature_extraction_summary = None
+    if feature_profiler.get_summary('feature_extraction'):
+        feature_extraction_summary = feature_profiler.get_summary('feature_extraction')
+        total_feature_samples = sum(len(samples) for samples in all_datasets.values())
+        print(f"\nFeature extraction profiling:")
+        print(f"  Total samples processed: {total_feature_samples}")
+        print(f"  Total time: {feature_extraction_summary['total_time_seconds']:.4f}s")
+        print(f"  Time per sample: {feature_extraction_summary['mean_time_seconds']:.6f}s")
+        print(f"  GPU memory: {feature_extraction_summary['total_gpu_memory_mb']:.2f}MB")
+    
     for layer_idx in layers:
         print(f"\n=== Evaluating Layer {layer_idx} ===")
+        
+        # Reset profiler for this layer
+        profiler.reset()
 
         # Prepare data for this layer
         layer_hidden_states = {}
@@ -1438,30 +1815,52 @@ def main():
                 layer_hidden_states[dataset_name] = all_hidden_states[dataset_name][layer_idx]
                 layer_labels[dataset_name] = all_labels[dataset_name]
 
-        # Apply layer-specific learned projection to transform features from 4096 to 256 dimensions
+        # Apply layer-specific learned projection to transform features to 256 dimensions
         # Note: Projection was trained ONLY on training data, now applied to all data
         print(f"  Applying layer-specific projection to layer {layer_idx} features...")
-        projected_layer_hidden_states = apply_learned_projection(
-            projection_models[layer_idx],
-            layer_hidden_states,
-            device=GPU_DEVICE
-        )
+        
+        # Profile projection application - measure ONLY forward pass (fair comparison)
+        total_projection_samples = sum(len(features) for features in layer_hidden_states.values())
+        
+        # Prepare data ONCE outside profiling (data prep overhead not included)
+        projection_inputs = {}
+        for dataset_name, features in layer_hidden_states.items():
+            features_array = np.array(features)
+            projection_inputs[dataset_name] = features_array
+        
+        # Now profile ONLY the forward pass
+        with profiler.profile('projection', num_samples=total_projection_samples):
+            projected_layer_hidden_states = {}
+            for dataset_name, features_array in projection_inputs.items():
+                # Convert to tensor and project in batches (same as apply_learned_projection but inline for profiling)
+                batch_size = 1000
+                projected_features = []
+                model = projection_models[layer_idx]
+                model.eval()
+                
+                with torch.no_grad():
+                    for i in range(0, len(features_array), batch_size):
+                        batch_features = features_array[i:i+batch_size]
+                        batch_tensor = torch.FloatTensor(batch_features).to(GPU_DEVICE)
+                        batch_projected = model(batch_tensor)
+                        projected_features.append(batch_projected.cpu().numpy())
+                        del batch_tensor, batch_projected
+                
+                projected_layer_hidden_states[dataset_name] = np.vstack(projected_features)
 
         # Use projected features instead of original features
         layer_hidden_states = projected_layer_hidden_states
         cleanup_gpu_memory()
 
-        # Prepare benign training data for KCD
-        benign_data, _ = prepare_knn_data_structure(
+        # Prepare in-distribution and OOD data structures
+        in_dist_data, ood_data = prepare_ood_data_structure(
             in_dist_datasets,
             {k: v for k, v in layer_hidden_states.items() if k in in_dist_datasets},
             {k: v for k, v in layer_labels.items() if k in in_dist_datasets}
         )
 
-        detector = KCDDetector(k=40, use_gpu=True, normalization=True)
-
-        # Prepare malicious training data from OOD datasets
-        malicious_data = {}
+        # For OOD data, we want the malicious samples from OOD datasets
+        ood_train_data = {}
         for dataset_name in ood_datasets.keys():
             if dataset_name in layer_hidden_states:
                 features = layer_hidden_states[dataset_name]
@@ -1470,64 +1869,68 @@ def main():
                 # Get malicious samples (should be most/all samples in OOD datasets)
                 malicious_features = [features[i] for i, label in enumerate(labels) if label == 1]
                 if malicious_features:
-                    malicious_data[f"{dataset_name}_malicious"] = malicious_features
+                    ood_train_data[f"{dataset_name}_malicious"] = malicious_features
 
-        # Fit KCD detector with both benign and malicious training data
-        print(f"  {get_gpu_memory_info()}")
-        try:
-            detector.fit_training_data(benign_data, malicious_data)
-            cleanup_gpu_memory()
-        except ValueError as e:
-            print(f"  Skipping layer {layer_idx} - {e}")
+        # Initialize and train MCD detector with GPU acceleration
+        detector = MCDDetector(use_gpu=True)
+
+        # Fit in-distribution clusters with GPU monitoring
+        # print(f"  {get_gpu_memory_info()}")
+        detector.fit_in_distribution(in_dist_data)
+        cleanup_gpu_memory()
+
+        # Fit OOD clusters with GPU monitoring
+        # print(f"  {get_gpu_memory_info()}")
+        detector.fit_ood_clusters(ood_train_data)
+        cleanup_gpu_memory()
+
+        # Debug: Check if clusters were created
+        # print(f"  In-distribution clusters: {len(detector.in_distribution_clusters)}")
+        # print(f"  OOD clusters: {len(detector.ood_clusters)}")
+
+        if len(detector.in_distribution_clusters) == 0 or len(detector.ood_clusters) == 0:
+            print(f"  Skipping layer {layer_idx} - insufficient clusters")
             continue
 
-        # Debug: Check if detector was fitted
-        if detector.benign_features is None or detector.malicious_features is None:
-            print(f"  Skipping layer {layer_idx} - detector not fitted properly")
-            continue
-
-        print(f"  KCD detector fitted with {len(detector.benign_features)} benign + {len(detector.malicious_features)} malicious samples, k={detector.k}")
-
-        # Create validation set from training data for threshold optimization
+        # Use a larger subset of training data for better threshold optimization
+        # Create balanced validation set with more samples
         val_features = []
         val_labels = []
 
-        # Sample from benign training data
-        for _, features in benign_data.items():
+        # Sample from in-distribution data (increase sample size for better threshold estimation)
+        # Use deterministic sampling based on indices for reproducibility
+        for _, features in in_dist_data.items():
             sample_size = min(100, len(features))
             if sample_size > 0:
-                sampled_features = random.sample(features, sample_size)
+                # Use deterministic sampling: take evenly spaced indices
+                indices = np.linspace(0, len(features)-1, sample_size, dtype=int)
+                sampled_features = [features[i] for i in indices]
                 val_features.extend(sampled_features)
                 val_labels.extend([0] * len(sampled_features))
 
-        # Sample from malicious training data (from OOD datasets)
-        for dataset_name in ood_datasets.keys():
-            if dataset_name in layer_hidden_states:
-                features = layer_hidden_states[dataset_name]
-                labels = layer_labels[dataset_name]
-
-                # Get malicious samples
-                malicious_features = [features[i] for i, label in enumerate(labels) if label == 1]
-                if malicious_features:
-                    sample_size = min(100, len(malicious_features))
-                    if sample_size > 0:
-                        sampled_features = random.sample(malicious_features, sample_size)
-                        val_features.extend(sampled_features)
-                        val_labels.extend([1] * len(sampled_features))
+        # Sample from OOD data (increase sample size for better threshold estimation)
+        for _, features in ood_train_data.items():
+            sample_size = min(100, len(features))
+            if sample_size > 0:
+                # Use deterministic sampling: take evenly spaced indices
+                indices = np.linspace(0, len(features)-1, sample_size, dtype=int)
+                sampled_features = [features[i] for i in indices]
+                val_features.extend(sampled_features)
+                val_labels.extend([1] * len(sampled_features))
 
         # Fit threshold with balanced validation set
         if val_features and len(set(val_labels)) > 1:
-            print(f"  Validation set: {len(val_features)} samples ({val_labels.count(0)} benign, {val_labels.count(1)} malicious)")
+            # print(f"  Validation set: {len(val_features)} samples ({val_labels.count(0)} benign, {val_labels.count(1)} malicious)")
 
             # Debug: Analyze score distributions before threshold fitting (use batch computation for speed)
-            print("  Computing validation scores...")
-            _, val_scores = detector.predict(val_features)  # Use batch computation
-            benign_scores = [val_scores[i] for i, label in enumerate(val_labels) if label == 0]
-            malicious_scores = [val_scores[i] for i, label in enumerate(val_labels) if label == 1]
+            # print("  Computing validation scores...")
+            # val_predictions, val_scores = detector.predict(val_features)  # Use batch computation
+            # benign_scores = [val_scores[i] for i, label in enumerate(val_labels) if label == 0]
+            # malicious_scores = [val_scores[i] for i, label in enumerate(val_labels) if label == 1]
 
-            print(f"  Validation score distributions:")
-            print(f"    Benign: mean={np.mean(benign_scores):.2f}, std={np.std(benign_scores):.2f}, range=[{np.min(benign_scores):.2f}, {np.max(benign_scores):.2f}]")
-            print(f"    Malicious: mean={np.mean(malicious_scores):.2f}, std={np.std(malicious_scores):.2f}, range=[{np.min(malicious_scores):.2f}, {np.max(malicious_scores):.2f}]")
+            # print(f"  Validation score distributions:")
+            # print(f"    Benign: mean={np.mean(benign_scores):.2f}, std={np.std(benign_scores):.2f}, range=[{np.min(benign_scores):.2f}, {np.max(benign_scores):.2f}]")
+            # print(f"    Malicious: mean={np.mean(malicious_scores):.2f}, std={np.std(malicious_scores):.2f}, range=[{np.min(malicious_scores):.2f}, {np.max(malicious_scores):.2f}]")
 
             detector.fit_threshold(val_features, val_labels)
         else:
@@ -1555,8 +1958,58 @@ def main():
 
         if combined_test_features:
             # Evaluate on combined test set (this simulates real-world usage)
-            print(f"  Combined test set: {len(combined_test_features)} samples")
-            combined_eval_results = detector.evaluate(combined_test_features, combined_test_labels)
+            num_test_samples = len(combined_test_features)
+            print(f"  Combined test set: {num_test_samples} samples")
+            
+            # Profile detection inference - measure ONLY distance calculation (fair comparison)
+            # Prepare features ONCE outside profiling (data prep overhead not included)
+            test_features_array = np.array(combined_test_features)
+            
+            # Now profile ONLY the distance calculation forward pass
+            with profiler.profile('detection', num_samples=num_test_samples):
+                # Use batch computation for MCD (same as detector.predict but inline for profiling)
+                if detector.use_gpu and len(test_features_array) > 10:
+                    scores = detector._compute_ood_scores_batch(test_features_array)
+                else:
+                    scores = np.array([detector.compute_ood_score(x) for x in test_features_array])
+                predictions = (scores > detector.threshold).astype(int)
+            
+            # Calculate metrics outside profiling (evaluation overhead not included)
+            accuracy = accuracy_score(combined_test_labels, predictions)
+            f1 = f1_score(combined_test_labels, predictions, zero_division=0)
+            
+            unique_classes = np.unique(combined_test_labels)
+            if len(unique_classes) > 1:
+                try:
+                    tn, fp, fn, tp = confusion_matrix(combined_test_labels, predictions).ravel()
+                    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+                    fpr_curve, tpr_curve, _ = roc_curve(combined_test_labels, scores)
+                    auroc = auc(fpr_curve, tpr_curve)
+                    precision, recall, _ = precision_recall_curve(combined_test_labels, scores)
+                    auprc = auc(recall, precision)
+                except:
+                    tpr = float('nan')
+                    fpr = float('nan')
+                    auroc = float('nan')
+                    auprc = float('nan')
+            else:
+                tpr = float('nan')
+                fpr = float('nan')
+                auroc = float('nan')
+                auprc = float('nan')
+            
+            combined_eval_results = {
+                'accuracy': accuracy,
+                'f1': f1,
+                'tpr': tpr,
+                'fpr': fpr,
+                'auroc': auroc,
+                'auprc': auprc,
+                'predictions': predictions,
+                'scores': scores,
+                'threshold': detector.threshold
+            }
 
             # Compute combined test score distributions for analysis
             combined_scores = combined_eval_results['scores']
@@ -1607,8 +2060,8 @@ def main():
                     malicious_stats = "no malicious samples"
 
                 print(f"    {test_dataset_name:15s}: Acc={dataset_accuracy:.4f}")
-                print(f"      Benign: {benign_stats}")
-                print(f"      Malicious: {malicious_stats}")
+                # print(f"      Benign: {benign_stats}")
+                # print(f"      Malicious: {malicious_stats}")
 
                 # Calculate F1, TPR, FPR for individual dataset
                 f1 = f1_score(dataset_labels, dataset_predictions, zero_division=0)
@@ -1644,11 +2097,22 @@ def main():
             layer_performance = {}
 
         layer_results[layer_idx] = layer_performance
+        
+        # Save profiling results for this layer (even if evaluation failed)
+        # Use COMBINED dataset for profiling (represents real-world usage)
+        try:
+            baseline_summary = baseline_profiler.get_summary('baseline_forward_pass') if baseline_profiler else None
+            save_profiling_results(profiler, profiling_output_path, layer_idx, 'COMBINED', 'MCD', 
+                                  feature_extraction_summary=feature_extraction_summary,
+                                  baseline_summary=baseline_summary)
+            print(f"  Efficiency metrics saved to {profiling_output_path}")
+        except Exception as e:
+            print(f"  Warning: Failed to save profiling results: {e}")
 
     # Calculate layer ranking based on COMBINED results (real-world performance)
     layer_combined_scores = []
     for layer_idx in layers:
-        if layer_results[layer_idx] and 'COMBINED' in layer_results[layer_idx]:
+        if layer_idx in layer_results and layer_results[layer_idx] and 'COMBINED' in layer_results[layer_idx]:
             combined_result = layer_results[layer_idx]['COMBINED']
             accuracy = combined_result['accuracy']
             auroc = combined_result['auroc'] if not np.isnan(combined_result['auroc']) else 0.0
@@ -1666,7 +2130,7 @@ def main():
     # Also calculate individual dataset averages for comparison
     layer_individual_avg_scores = []
     for layer_idx in layers:
-        if layer_results[layer_idx]:
+        if layer_idx in layer_results and layer_results[layer_idx]:
             # Exclude COMBINED from individual averages
             individual_results = {k: v for k, v in layer_results[layer_idx].items() if k != 'COMBINED'}
             if individual_results:
@@ -1682,7 +2146,7 @@ def main():
     layer_individual_avg_scores.sort(key=lambda x: x[1], reverse=True)
 
     # Save results to CSV with model-specific filename
-    output_path = f"results/balanced_kcd_{model_type}_results.csv"
+    output_path = f"results/balanced_mcd_{model_type}_results.csv"
     with open(output_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Layer", "Dataset", "Method", "Accuracy", "F1", "TPR", "FPR", "AUROC", "AUPRC", "Threshold", "Combined_Rank", "Individual_Rank"])
@@ -1694,7 +2158,7 @@ def main():
         layer_individual_ranking = {layer_idx: rank for rank, (layer_idx, _) in enumerate(layer_individual_avg_scores, 1)}
 
         for layer_idx in layers:
-            if layer_results[layer_idx]:
+            if layer_idx in layer_results and layer_results[layer_idx]:
                 for dataset_name, result in layer_results[layer_idx].items():
                     # Handle NaN values for CSV
                     f1_val = f"{result['f1']:.4f}"
@@ -1709,7 +2173,7 @@ def main():
                     writer.writerow([
                         layer_idx,
                         dataset_name,
-                        "KCD",
+                        "MCD",
                         f"{result['accuracy']:.4f}",
                         f1_val,
                         tpr_val,
@@ -1723,24 +2187,13 @@ def main():
 
     print(f"\nResults saved to {output_path}")
 
-    # Print summary results
-    print("\n" + "="*120)
-    print("BALANCED OOD JAILBREAK DETECTION SUMMARY (KCD Algorithm)")
-    print("="*120)
-    print("Training Configuration (2,000 samples, 1:1 ratio):")
-    print(f"  In-Distribution Datasets: {list(in_dist_datasets.keys())}")
-    print(f"  OOD Datasets: {list(ood_datasets.keys())}")
-    print("Test Configuration (1,800 samples, 1:1 ratio):")
-    print(f"  Test Datasets: {list(test_datasets.keys())}")
-    print("-"*120)
-
     # COMBINED PERFORMANCE RANKING (Real-world scenario)
     print(f"\n{'COMBINED PERFORMANCE RANKING (Real-world scenario)':<120}")
     print(f"{'Layer':<6} {'Accuracy':<10} {'F1':<8} {'TPR':<8} {'FPR':<8} {'AUROC':<10} {'AUPRC':<10} {'Combined':<10}")
     print("-" * 120)
 
     for layer_idx, accuracy, auroc, auprc, combined_score in layer_combined_scores:
-        if layer_results[layer_idx] and 'COMBINED' in layer_results[layer_idx]:
+        if layer_idx in layer_results and layer_results[layer_idx] and 'COMBINED' in layer_results[layer_idx]:
             combined_result = layer_results[layer_idx]['COMBINED']
             acc_str = f"{accuracy:.3f}"
             f1_str = f"{combined_result['f1']:.3f}"
@@ -1753,69 +2206,6 @@ def main():
             print(f"{layer_idx:<6} {acc_str:<10} {f1_str:<8} {tpr_str:<8} {fpr_str:<8} {auroc_str:<10} {auprc_str:<10} {combined_str:<10}")
         else:
             print(f"{layer_idx:<6} {'N/A':<10} {'N/A':<8} {'N/A':<8} {'N/A':<8} {'N/A':<10} {'N/A':<10} {'0.000':<10}")
-
-    # INDIVIDUAL DATASET AVERAGE RANKING (for comparison)
-    print(f"\n{'INDIVIDUAL DATASET AVERAGE RANKING (for comparison)':<100}")
-    print(f"{'Layer':<6} {'Avg_Acc':<10} {'XSTest':<12} {'FigTxt':<12} {'VQAv2':<12} {'VAE':<12} {'JBV-Test':<12}")
-    print("-" * 100)
-
-    for layer_idx, avg_acc in layer_individual_avg_scores:
-        layer_perf = layer_results[layer_idx]
-
-        # Format average accuracy
-        avg_str = f"{avg_acc:.3f}"
-
-        # Format individual dataset performances (excluding COMBINED)
-        dataset_strs = []
-        for dataset_name in ['XSTest_safe', 'XSTest_unsafe', 'FigTxt_safe', 'FigTxt_unsafe', 'VQAv2', 'VAE', 'JailbreakV-28K_test']:
-            if dataset_name in layer_perf:
-                acc = layer_perf[dataset_name]['accuracy']
-                dataset_strs.append(f"{acc:.3f}")
-            else:
-                dataset_strs.append("N/A")
-
-        print(f"{layer_idx:<6} {avg_str:<10} {dataset_strs[0]:<12} {dataset_strs[1]:<12} {dataset_strs[2]:<12} {dataset_strs[3]:<12} {dataset_strs[4]:<12}")
-
-    # DOMAIN SHIFT ANALYSIS
-    print(f"\n{'DOMAIN SHIFT ANALYSIS':<100}")
-    print("Comparing validation vs test score distributions to identify domain shift:")
-    print("-" * 100)
-
-    # Find the best performing layer for detailed analysis
-    if layer_combined_scores:
-        best_layer = layer_combined_scores[0][0]
-        print(f"Analysis for best performing layer: {best_layer}")
-        print("(Validation scores were shown during training)")
-        print("(Test scores are shown in individual dataset analysis above)")
-        print("Large differences between validation and test score distributions indicate domain shift.")
-
-    print("\n" + "="*120)
-    print("DETAILED LAYER PERFORMANCE")
-    print("="*120)
-
-    for layer_idx in layers:
-        print(f"\nLayer {layer_idx}:")
-        print("-" * 80)
-
-        if layer_results[layer_idx]:
-            for dataset_name, result in layer_results[layer_idx].items():
-                # Handle NaN values in summary
-                f1_str = f"{result['f1']:.4f}"
-                tpr_str = "N/A" if np.isnan(result['tpr']) else f"{result['tpr']:.4f}"
-                fpr_str = "N/A" if np.isnan(result['fpr']) else f"{result['fpr']:.4f}"
-                auroc_str = "N/A" if np.isnan(result['auroc']) else f"{result['auroc']:.4f}"
-                auprc_str = "N/A" if np.isnan(result['auprc']) else f"{result['auprc']:.4f}"
-
-                print(f"  {dataset_name:15s}: Acc={result['accuracy']:.4f}, F1={f1_str}, TPR={tpr_str}, FPR={fpr_str}, "
-                      f"AUROC={auroc_str}, AUPRC={auprc_str}, Thresh={result['threshold']:.4f}")
-        else:
-            print("  No results for this layer")
-
-    print("="*120)
-    print("- Balanced 1:1 training and test ratios for robust evaluation")
-    print("- Training: Alpaca (500) + MM-Vet (218) + OpenAssistant (282) vs AdvBench (300) + JailbreakV-28K (550) + DAN (150)")
-    print("- Testing: XSTest + FigTxt + VQAv2 (safe) vs XSTest + FigTxt + VAE + JailbreakV-28K (unsafe)")
-
 
 if __name__ == "__main__":
     main()
