@@ -22,7 +22,6 @@ pip install -r requirements_qwen25vl.txt
 ```
 
 **For InternVL3-8B:**
-If you encounter problems on RTX5090, please open the requirement files and uncomment the newer versions of torch.
 ```bash
 conda create -n internvl3 python=3.10 -y
 conda activate internvl3
@@ -31,7 +30,7 @@ pip install -r requirements_internvl3.txt
 
 ### 2. Download Models
 
-The project supports multiple vision-language models. For the main experiments, we support LLaVA, Qwen, and InternVL. Download all required models:
+The project supports multiple vision-language models such as LLaVA, Qwen, and InternVL. Download all required models:
 
 ```bash
 python download_models.py
@@ -44,7 +43,7 @@ This will download the following models to the `model/` directory:
 - **Qwen2.5-VL-7B-Instruct**: Larger Qwen model (~13GB, default in our Qwen experiments)
 - **InternVL3-8B**: OpenGVLab InternVL3 (~15GB)
 
-Note that you can customize the models to download by editing `MODELS_TO_DOWNLOAD` in `download_models.py` by considering the experiments you want to run and available disk space. If you only need to run the main experiment, you only need to download the specific target model (FLAVA and CLIP are mostly for baselines).
+Note that you can customize the models to download by editing `MODELS_TO_DOWNLOAD` in `download_models.py` by considering the experiments you want to run and available disk space. If you only need to run the main experiment, you only need to download the specific target model (FLAVA only for the baseline).
 
 The model downloading script will download the model to `./model` locally for faster testing and development. If you wish not to do so, you can skip this step and the model will download when you first run the script.
 
@@ -77,3 +76,8 @@ python code/run_multiple_experiments.py --script kcd --model qwen --runs 5
 - Use `run_multiple_experiments.py` to run an experiment multiple times and aggregate the results.
 - `feature_cache`, `load_datasets`, `profiling_utils`, `feature_extractor*` are helper scripts
 - Code in `analysis` can be used to replicate several visualizations such as PCA analysis and visualization of our layer selection heuristics.
+
+## Contact
+Please contact Peichun Hua at <peichunhua@link.cuhk.edu.cn> or <peichunhua04@gmail.com> for any question about the code or paper instead of the WashU email in the paper (because I have left WashU and do not have access to the mailbox anymore).
+
+## Citation
