@@ -78,6 +78,16 @@ python code/run_multiple_experiments.py --script kcd --model qwen --runs 5
 - Code in `analysis` can be used to replicate several visualizations such as PCA analysis and visualization of our layer selection heuristics.
 
 ## Contact
-Please contact Peichun Hua at <peichunhua@link.cuhk.edu.cn> or <peichunhua04@gmail.com> for any question about the code or paper instead of the WashU email in the paper (because I have left WashU and do not have access to the mailbox anymore).
+Please contact Peichun Hua at <peichunhua04@gmail.com> for any question about the code or paper instead of the WashU email in the paper (because I have left WashU and do not have access to the mailbox anymore).
 
 ## Citation
+
+@misc{hua2025rethinkingjailbreakdetectionlarge,
+      title={Rethinking Jailbreak Detection of Large Vision Language Models with Representational Contrastive Scoring}, 
+      author={Peichun Hua and Hao Li and Shanghao Shi and Zhiyuan Yu and Ning Zhang},
+      year={2025},
+      eprint={2512.12069},
+      archivePrefix={arXiv},
+      primaryClass={cs.CR},
+      url={https://arxiv.org/abs/2512.12069}, 
+}
