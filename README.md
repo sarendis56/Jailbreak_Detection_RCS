@@ -1,4 +1,4 @@
-# Rethinking Jailbreak Detection of Large Vision Language Models with Representational Contrastive Scoring
+# (ACL 2026) Rethinking Jailbreak Detection of Large Vision Language Models with Representational Contrastive Scoring
 
 ## Setup
 
