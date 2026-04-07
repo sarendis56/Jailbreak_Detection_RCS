@@ -9,7 +9,7 @@ git clone https://github.com/haotian-liu/LLaVA.git
 conda create -n llava python=3.10 -y
 conda activate llava
 cd LLaVA && pip install -e . && cd ..
-pip install -r requirements_llava.txt  # additional packages required to run our experiments
+pip install -r requirements_llava.txt  # additional packages and dependencies required to run our experiments (please do not skip)
 ```
 
 We also provide environment requirement files for different models:
@@ -52,7 +52,7 @@ The model downloading script will download the model to `./model` locally for fa
 ```bash
 python download_datasets.py
 ```
-After this, download the rest of the datasets with [This link](https://drive.google.com/file/d/1V09sherPVm6M0E_J_xz3uJ6IBrZ66cRV/view?usp=sharing) (recommended) or manually following the instructions in the terminal.
+After this, download the rest of the datasets with [this link](https://drive.google.com/file/d/1V09sherPVm6M0E_J_xz3uJ6IBrZ66cRV/view?usp=sharing) (recommended) or manually following the instructions in the terminal.
 
 ### 4. Verify Setup
 
