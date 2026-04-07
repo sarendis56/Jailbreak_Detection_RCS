@@ -459,12 +459,12 @@ def print_manual_instructions():
     
     print("\nThe following datasets need to be downloaded manually:")
     print("\n1. MM-Vet (Multimodal Reasoning)")
-    print("   - Download dataset from: https://github.com/yuweihao/MM-Vet")
+    print("   - Download dataset from: https://github.com/yuweihao/MM-Vet/releases/download/v1/mm-vet.zip")
     print("   - JSON file should be at: data/mm-vet/mm-vet.json")
     
     print("\n2. FigTxt (Figure-Text Attacks)")
-    print("   - Download SafeBench from: https://github.com/ThuCCSLab/FigStep")
-    print("   - Download benign questions from: https://github.com/leigest519/HiddenDetect/tree/main/data/FigStep")
+    print("   - Download SafeBench from: https://github.com/CryptoAILab/FigStep/blob/main/data/question/safebench.csv")
+    print("   - Download benign questions from: https://github.com/leigest519/HiddenDetect/blob/main/data/FigStep/benign_questions.csv")
     print("   - Place files at:")
     print("     - data/FigTxt/benign_questions.csv")
     print("     - data/FigTxt/safebench.csv")
@@ -479,6 +479,7 @@ def print_manual_instructions():
     
     print("\n4. VAE Adversarial Images")
     print("   - Download from: https://github.com/Unispac/Visual-Adversarial-Examples-Jailbreak-Large-Language-Models")
+    print("   - and: https://github.com/Unispac/Visual-Adversarial-Examples-Jailbreak-Large-Language-Models/tree/main/harmful_corpus")
     print("   - Place files at:")
     print("     - data/VAE/manual_harmful_instructions.csv")
     print("     - data/VAE/adversarial_images/")
