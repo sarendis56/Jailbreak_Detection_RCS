@@ -712,7 +712,7 @@ def locate_most_safety_aware_layers(model_path):
 
 
 if __name__ == "__main__":
-    model_path = "./model/qwen2.5-vl-7b-instruct"
+    model_path = "model/qwen2.5-vl-7b-instruct"
 
     print("=" * 80)
     print("QWEN2.5-VL ADAPTIVE SAFETY LAYER DETECTION")

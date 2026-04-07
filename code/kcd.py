@@ -1495,7 +1495,7 @@ def main():
 
     model_type = REQUESTED_MODEL
     if model_type == "qwen":
-        model_path = "./model/qwen2.5-vl-7b-instruct"
+        model_path = "model/qwen2.5-vl-7b-instruct"
     elif model_type == "llava":
         model_path = "model/llava-v1.6-vicuna-7b/"
     elif model_type == "internvl":

@@ -1176,7 +1176,7 @@ if __name__ == "__main__":
     # Set environment variable to help with memory fragmentation
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    model_path = "./model/qwen2.5-vl-7b-instruct"
+    model_path = "model/qwen2.5-vl-7b-instruct"
 
     print("=" * 80)
     print("UNSUPERVISED JAILBREAK DETECTION WITH BALANCED DATASETS (QWEN)")

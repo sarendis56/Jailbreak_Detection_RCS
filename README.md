@@ -13,7 +13,7 @@ pip install -r requirements_llava.txt  # additional packages and dependencies re
 ```
 Do not switch the order of the last two commands above. After running the last, it might tell you about a version mismatch that llava requires an older PyTorch, *it is fine*.
 
-We also provide environment requirement files for different models. Our scripts `kcd.py` and `mcd.py` are programmed to **adaptively load different models based on the available model checkpoints**:
+We also provide environment requirement files for different models. Our scripts `kcd.py` and `mcd.py` choose the model from the command line (`--model` / `-m`, or a positional `llava`, `qwen`, or `internvl` argument), then map that choice to a fixed local checkpoint path under `model/`. If no model is specified, they default to `llava`.
 
 **For Qwen2.5-VL:**
 ```bash
@@ -67,12 +67,13 @@ mkdir results
 Run experiments from the project root directory (*not inside the `code` directory*).
 
 ```bash
-python code/kcd.py
+python code/kcd.py # by default llava is used
+python code/mcd.py --model qwen # or -m for controlling which model to run
 python code/run_multiple_experiments.py --script kcd --model qwen --runs 5
 ```
 
 - Scripts `kcd.py`, `mcd.py` are the main scripts of our methods.
-- Scripts starting with `hidden_detect_` are our best-effort replication of HiddenDetect (ACL 2025), including the layer selection heuristics and detection.
+- Scripts starting with `hidden_detect_` are our best-effort replication of [HiddenDetect (ACL 2025)](https://github.com/leigest519/hiddendetect) in our scenario, including its proposed layer selection heuristics and detection.
 - Use `run_multiple_experiments.py` to run an experiment multiple times and aggregate the results.
 - `feature_cache`, `load_datasets`, `profiling_utils`, `feature_extractor*` are helper scripts
 - Code in `analysis` can be used to replicate several visualizations such as PCA analysis and visualization of our layer selection heuristics.
