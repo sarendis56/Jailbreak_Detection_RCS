@@ -11,8 +11,9 @@ conda activate llava
 cd LLaVA && pip install -e . && cd ..
 pip install -r requirements_llava.txt  # additional packages and dependencies required to run our experiments (please do not skip)
 ```
+Do not switch the order of the last two commands above. After running the last, it might tell you about a version mismatch that llava requires an older PyTorch, *it is fine*.
 
-We also provide environment requirement files for different models:
+We also provide environment requirement files for different models. Our scripts `kcd.py` and `mcd.py` are programmed to **adaptively load different models based on the available model checkpoints**:
 
 **For Qwen2.5-VL:**
 ```bash

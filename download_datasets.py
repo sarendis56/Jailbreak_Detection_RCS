@@ -454,10 +454,8 @@ def download_mm_safety_bench():
 def print_manual_instructions():
     """Print instructions for manually downloading datasets"""
     print("\n" + "="*80)
-    print("MANUAL DATASET DOWNLOAD INSTRUCTIONS")
-    print("="*80)
-
-    print("DOWNLOAD ALL BELOW WITH ONE LINK: https://drive.google.com/file/d/1V09sherPVm6M0E_J_xz3uJ6IBrZ66cRV/view?usp=sharing")
+    print("MANUAL DATASET DOWNLOAD")
+    print("[Recommended] DOWNLOAD ALL BELOW WITH ONE LINK: https://drive.google.com/file/d/1V09sherPVm6M0E_J_xz3uJ6IBrZ66cRV/view?usp=sharing")
     
     print("\nThe following datasets need to be downloaded manually:")
     print("\n1. MM-Vet (Multimodal Reasoning)")
