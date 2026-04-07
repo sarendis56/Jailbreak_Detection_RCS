@@ -69,7 +69,7 @@ Run experiments from the project root directory (*not inside the `code` director
 ```bash
 python code/kcd.py # by default llava is used
 python code/mcd.py --model qwen # or -m for controlling which model to run
-python code/run_multiple_experiments.py --script kcd --model qwen --runs 5
+python code/run_multiple_experiments.py --script kcd --model qwen --runs 5 # repeat with different seeds
 ```
 
 - Scripts `kcd.py`, `mcd.py` are the main scripts of our methods.

@@ -5,6 +5,7 @@ import warnings
 import signal
 import sys
 import os
+from typing import Any, cast
 from scipy.linalg import inv
 from sklearn.metrics import (
     accuracy_score,
@@ -32,8 +33,8 @@ warnings.filterwarnings("ignore", message=".*Palette images with Transparency.*"
 from load_datasets import *
 from feature_cache import FeatureCache
 from profiling_utils import PerformanceProfiler, save_profiling_results
-from llava.mm_utils import tokenizer_image_token
-from llava.constants import IMAGE_TOKEN_INDEX
+from llava.mm_utils import tokenizer_image_token  # pyright: ignore[reportMissingImports]
+from llava.constants import IMAGE_TOKEN_INDEX  # pyright: ignore[reportMissingImports]
 
 # Smart import handling based on command line arguments and available dependencies
 import sys
@@ -48,30 +49,30 @@ class ProjectionConfig:
     # Projection training mode
     # "single_layer": Train one projection on layer 16, use for all layers (original method)
     # "layer_specific": Train separate projection for each layer (new method)
-    PROJECTION_MODE = "layer_specific"  # Change this to switch modes
+    PROJECTION_MODE: str = "layer_specific"  # Change this to switch modes
 
     # Single layer mode settings
-    SINGLE_LAYER_TRAINING_LAYER = 18  # Which layer to use for training projection
+    SINGLE_LAYER_TRAINING_LAYER: int = 18  # Which layer to use for training projection
 
     # Training hyperparameters
-    PROJECTION_EPOCHS = 100
-    PROJECTION_BATCH_SIZE = 64
-    PROJECTION_LEARNING_RATE = 1e-3
-    PROJECTION_LR_SCHEDULER = "cosine"
-    PROJECTION_STEP_SIZE = 25
-    PROJECTION_GAMMA = 0.5
-    PROJECTION_COSINE_MIN_LR_FACTOR = 0.05
-    PROJECTION_MAX_PATIENCE = 15
+    PROJECTION_EPOCHS: int = 100
+    PROJECTION_BATCH_SIZE: int = 64
+    PROJECTION_LEARNING_RATE: float = 1e-3
+    PROJECTION_LR_SCHEDULER: str = "cosine"
+    PROJECTION_STEP_SIZE: int = 25
+    PROJECTION_GAMMA: float = 0.5
+    PROJECTION_COSINE_MIN_LR_FACTOR: float = 0.05
+    PROJECTION_MAX_PATIENCE: int = 15
 
     # Architecture settings (will be set dynamically based on model)
-    INPUT_DIM = 4096  # Default for LLaVA/InternVL, will be updated for Qwen (2048)
-    OUTPUT_DIM = 256
-    HIDDEN_DIM = 512
-    DROPOUT = 0.3
+    INPUT_DIM: int = 4096  # Default for LLaVA/InternVL, will be updated for Qwen (2048)
+    OUTPUT_DIM: int = 256
+    HIDDEN_DIM: int = 512
+    DROPOUT: float = 0.3
 
     # Loss weighting settings
-    DATASET_LOSS_WEIGHT = 1.0  # Weight for dataset classification loss
-    TOXICITY_LOSS_WEIGHT = (
+    DATASET_LOSS_WEIGHT: float = 1.0  # Weight for dataset classification loss
+    TOXICITY_LOSS_WEIGHT: float = (
         5.0  # Weight for toxicity detection loss (higher to balance magnitude)
     )
 
@@ -212,12 +213,13 @@ def parse_token_strategy():
 
 
 TOKEN_STRATEGY = parse_token_strategy()
+SKLEARN_ZERO_DIVISION: Any = 0
 
 # Import appropriate dependencies based on requested model
 if REQUESTED_MODEL == "qwen":
     try:
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-        from qwen_vl_utils import process_vision_info
+        from qwen_vl_utils import process_vision_info  # pyright: ignore[reportMissingImports]
         from feature_extractor_qwen import HiddenStateExtractor
 
         QWEN_AVAILABLE = True
@@ -890,7 +892,7 @@ def compute_matrix_inverse_gpu(matrix, device=None):
             # Try Cholesky first (faster for positive definite matrices)
             L = torch.linalg.cholesky(matrix_gpu)
             inv_gpu = torch.cholesky_inverse(L)
-        except torch.linalg.LinAlgError:
+        except RuntimeError:
             # Matrix is not positive definite; use pseudo-inverse (also handles singular matrices)
             inv_gpu = torch.linalg.pinv(matrix_gpu)
 
@@ -1211,7 +1213,9 @@ class MCDDetector:
             try:
                 # Use balanced accuracy as primary metric (handles class imbalance better)
                 balanced_acc = balanced_accuracy_score(validation_labels, y_pred)
-                f1 = f1_score(validation_labels, y_pred, zero_division=0)
+                f1 = f1_score(
+                    validation_labels, y_pred, zero_division=SKLEARN_ZERO_DIVISION
+                )
 
                 # For domain shift robustness, prioritize balanced accuracy over F1
                 combined_score = 0.8 * balanced_acc + 0.2 * f1
@@ -1323,7 +1327,9 @@ class MCDDetector:
         accuracy = accuracy_score(test_labels, predictions)
 
         # Calculate F1 score
-        f1 = f1_score(test_labels, predictions, zero_division=0)
+        f1 = f1_score(
+            test_labels, predictions, zero_division=SKLEARN_ZERO_DIVISION
+        )
 
         # Calculate TPR, FPR from confusion matrix and AUROC/AUPRC
         unique_classes = np.unique(test_labels)
@@ -1576,6 +1582,8 @@ def prepare_balanced_evaluation():
     """
     print("Loading balanced evaluation datasets...")
     test_datasets = {}
+    xstest_samples = None
+    figtxt_samples = None
 
     # === SAFE TEST DATA (900 total) ===
     print("Loading safe test data (900 samples)...")
@@ -1593,7 +1601,7 @@ def prepare_balanced_evaluation():
 
     # 2. XSTest unsafe - 200 samples
     try:
-        if "xstest_samples" in locals():
+        if xstest_samples is not None:
             xstest_unsafe = [s for s in xstest_samples if s.get("toxicity", 0) == 1][
                 :200
             ]
@@ -1616,7 +1624,7 @@ def prepare_balanced_evaluation():
 
     # 4. FigTxt unsafe - 350 samples
     try:
-        if "figtxt_samples" in locals():
+        if figtxt_samples is not None:
             figtxt_unsafe = [s for s in figtxt_samples if s.get("toxicity", 0) == 1][
                 :350
             ]
@@ -1753,7 +1761,7 @@ def main():
         all_datasets, model_path, CACHE_EXPERIMENT_NAME
     )
 
-    extractor = get_model_specific_extractor(model_path, model_type)
+    extractor = cast(Any, get_model_specific_extractor(model_path, model_type))
 
     if cache_ready and cached_layer_range is not None:
         layer_start, layer_end = cached_layer_range
@@ -1937,7 +1945,7 @@ def main():
         # Get a sample feature to determine the actual input dimension
         sample_dataset = next(iter(all_hidden_states.keys()))
         sample_layer = next(iter(all_hidden_states[sample_dataset].keys()))
-        sample_features = all_hidden_states[sample_dataset][sample_layer]
+        sample_features = cast(Any, all_hidden_states[sample_dataset][sample_layer])
 
         # Handle case where sample_features is a list of arrays
         if isinstance(sample_features, list) and len(sample_features) > 0:
@@ -1949,10 +1957,11 @@ def main():
             )
         elif hasattr(sample_features, "shape"):
             # sample_features is already a numpy array
+            sample_features_array = cast(Any, sample_features)
             actual_input_dim = (
-                sample_features.shape[1]
-                if len(sample_features.shape) > 1
-                else sample_features.shape[0]
+                sample_features_array.shape[1]
+                if len(sample_features_array.shape) > 1
+                else sample_features_array.shape[0]
             )
         else:
             actual_input_dim = None
@@ -2067,9 +2076,8 @@ def main():
     profiling_output_path = f"results/efficiency_mcd_{model_type}.csv"
 
     # Store feature extraction profiling summary (measured once, shared across layers)
-    feature_extraction_summary = None
-    if feature_profiler.get_summary("feature_extraction"):
-        feature_extraction_summary = feature_profiler.get_summary("feature_extraction")
+    feature_extraction_summary = feature_profiler.get_summary("feature_extraction")
+    if feature_extraction_summary is not None:
         total_feature_samples = sum(len(samples) for samples in all_datasets.values())
         print(f"\nFeature extraction profiling:")
         print(f"  Total samples processed: {total_feature_samples}")
@@ -2273,7 +2281,11 @@ def main():
 
             # Calculate metrics outside profiling (evaluation overhead not included)
             accuracy = accuracy_score(combined_test_labels, predictions)
-            f1 = f1_score(combined_test_labels, predictions, zero_division=0)
+            f1 = f1_score(
+                combined_test_labels,
+                predictions,
+                zero_division=SKLEARN_ZERO_DIVISION,
+            )
 
             unique_classes = np.unique(combined_test_labels)
             if len(unique_classes) > 1:
@@ -2405,7 +2417,11 @@ def main():
                 # print(f"      Malicious: {malicious_stats}")
 
                 # Calculate F1, TPR, FPR for individual dataset
-                f1 = f1_score(dataset_labels, dataset_predictions, zero_division=0)
+                f1 = f1_score(
+                    dataset_labels,
+                    dataset_predictions,
+                    zero_division=SKLEARN_ZERO_DIVISION,
+                )
 
                 # Calculate TPR, FPR from confusion matrix
                 unique_classes = np.unique(dataset_labels)

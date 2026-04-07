@@ -315,6 +315,7 @@ class HiddenStateExtractor:
         batch_size=50,
         memory_cleanup_freq=5,
         experiment_name=None,
+        token_strategy="last_token",
     ):
         """Extract hidden states from Qwen model"""
 

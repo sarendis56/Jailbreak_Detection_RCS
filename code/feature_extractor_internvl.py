@@ -248,6 +248,7 @@ class HiddenStateExtractor:
         batch_size=10,
         memory_cleanup_freq=5,
         experiment_name=None,
+        token_strategy="last_token",
     ):
         if layer_start is None or layer_end is None:
             default_start, default_end = self.get_default_layer_range()
