@@ -18,12 +18,27 @@ warnings.filterwarnings("ignore", message=".*copying from a non-meta parameter.*
 
 
 refusal_lst = [
-        "Sorry", "sorry",
-        "unfortunately", "unfortunate", "sadly",
-        "explicit", "deadly", "crim", "criminal", "illegal", "dangerous", "harmful", "warning", "alarm", "caution",
-        "shame", "conspiracy",
-        "Subject", "contrary", "shouldn"
-    ]
+    "Sorry",
+    "sorry",
+    "unfortunately",
+    "unfortunate",
+    "sadly",
+    "explicit",
+    "deadly",
+    "crim",
+    "criminal",
+    "illegal",
+    "dangerous",
+    "harmful",
+    "warning",
+    "alarm",
+    "caution",
+    "shame",
+    "conspiracy",
+    "Subject",
+    "contrary",
+    "shouldn",
+]
 
 
 def _load_internvl_model(model_path: str):
@@ -34,10 +49,12 @@ def _load_internvl_model(model_path: str):
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
-        use_flash_attn=True,
-        device_map="auto"
+        use_flash_attn=False,
+        device_map="auto",
     ).eval()
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=True, use_fast=False
+    )
     return tokenizer, model, config
 
 
@@ -52,17 +69,19 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def build_transform(input_size):
-    transform = T.Compose([
-        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
-    ])
+    transform = T.Compose(
+        [
+            T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+            T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+            T.ToTensor(),
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
     return transform
 
 
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
-    best_ratio_diff = float('inf')
+    best_ratio_diff = float("inf")
     best_ratio = (1, 1)
     area = width * height
     for ratio in target_ratios:
@@ -77,15 +96,22 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_
     return best_ratio
 
 
-def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbnail=True):
+def dynamic_preprocess(
+    image, min_num=1, max_num=12, image_size=448, use_thumbnail=True
+):
     orig_width, orig_height = image.size
     aspect_ratio = orig_width / orig_height
     target_ratios = set(
-        (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1)
+        (i, j)
+        for n in range(min_num, max_num + 1)
+        for i in range(1, n + 1)
+        for j in range(1, n + 1)
         if i * j <= max_num and i * j >= min_num
     )
     target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
-    target_aspect_ratio = find_closest_aspect_ratio(aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+    target_aspect_ratio = find_closest_aspect_ratio(
+        aspect_ratio, target_ratios, orig_width, orig_height, image_size
+    )
     target_width = image_size * target_aspect_ratio[0]
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
@@ -96,7 +122,7 @@ def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbna
             (i % (target_width // image_size)) * image_size,
             (i // (target_width // image_size)) * image_size,
             ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size
+            ((i // (target_width // image_size)) + 1) * image_size,
         )
         split_img = resized_img.crop(box)
         processed_images.append(split_img)
@@ -107,9 +133,13 @@ def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbna
     return processed_images
 
 
-def load_image_to_pixel_values(image, input_size=448, max_num=12, device=None, dtype=None):
+def load_image_to_pixel_values(
+    image, input_size=448, max_num=12, device=None, dtype=None
+):
     transform = build_transform(input_size=input_size)
-    tiles = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
+    tiles = dynamic_preprocess(
+        image, image_size=input_size, use_thumbnail=True, max_num=max_num
+    )
     pixel_values = [transform(tile) for tile in tiles]
     pixel_values = torch.stack(pixel_values)
     if dtype is not None:
@@ -123,8 +153,8 @@ def load_image_from_path_or_url(path_or_url: str) -> Image.Image:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
         resp = requests.get(path_or_url)
         resp.raise_for_status()
-        return Image.open(BytesIO(resp.content)).convert('RGB')
-    return Image.open(path_or_url).convert('RGB')
+        return Image.open(BytesIO(resp.content)).convert("RGB")
+    return Image.open(path_or_url).convert("RGB")
 
 
 def locate_most_safety_aware_layers(model_path: str):
@@ -136,17 +166,23 @@ def locate_most_safety_aware_layers(model_path: str):
         print(f"Error: {json_file_path} not found. Please extract few_shot.zip first.")
         return None
 
-    with open(json_file_path, 'r', encoding='utf-8') as f:
+    with open(json_file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     few_shot_safe = []
     few_shot_unsafe = []
     for sample in data:
         img_field = sample.get("img")
-        entry = {"txt": sample.get("txt", ""), "toxicity": sample.get("toxicity", 0), "img": None}
+        entry = {
+            "txt": sample.get("txt", ""),
+            "toxicity": sample.get("toxicity", 0),
+            "img": None,
+        }
         if img_field and img_field != "null":
             # map relative paths to data/few_shot
-            if isinstance(img_field, str) and not img_field.startswith(("http://", "https://", "/", "data/few_shot/")):
+            if isinstance(img_field, str) and not img_field.startswith(
+                ("http://", "https://", "/", "data/few_shot/")
+            ):
                 entry["img"] = os.path.join("data/few_shot", img_field)
             else:
                 entry["img"] = img_field
@@ -155,7 +191,9 @@ def locate_most_safety_aware_layers(model_path: str):
         else:
             few_shot_safe.append(entry)
 
-    print(f"Loaded few-shot dataset: {len(few_shot_safe)} safe, {len(few_shot_unsafe)} unsafe samples")
+    print(
+        f"Loaded few-shot dataset: {len(few_shot_safe)} safe, {len(few_shot_unsafe)} unsafe samples"
+    )
     if len(few_shot_safe) == 0 or len(few_shot_unsafe) == 0:
         print("Error: Not enough text-only samples for InternVL safety layer baseline")
         return None
@@ -174,10 +212,10 @@ def locate_most_safety_aware_layers(model_path: str):
     refusal_token_ids = [x for x in refusal_token_ids if not (x in seen or seen.add(x))]
 
     # Determine vocab size and lm_head
-    lm = getattr(model, 'language_model', None)
+    lm = getattr(model, "language_model", None)
     lm_head = None
     vocab_size = None
-    if lm is not None and hasattr(lm, 'lm_head'):
+    if lm is not None and hasattr(lm, "lm_head"):
         lm_head = lm.lm_head
         vocab_size = lm_head.weight.shape[0]
     else:
@@ -218,46 +256,59 @@ def locate_most_safety_aware_layers(model_path: str):
                     input_size=448,
                     max_num=12,
                     device=model.device,
-                    dtype=getattr(model, 'dtype', torch.bfloat16)
+                    dtype=getattr(model, "dtype", torch.bfloat16),
                 )
                 # Build multimodal prompt with explicit IMG tokens matching InternVL3 forward
                 num_patches = pixel_values.size(0)
-                IMG_START_TOKEN = '<img>'
-                IMG_END_TOKEN = '</img>'
-                IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
-                model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
-                image_tokens = IMG_START_TOKEN + (IMG_CONTEXT_TOKEN * (getattr(model, 'num_image_token') * num_patches)) + IMG_END_TOKEN
-                query = (text or '')
-                if '<image>' in query:
-                    query = query.replace('<image>', image_tokens, 1)
+                IMG_START_TOKEN = "<img>"
+                IMG_END_TOKEN = "</img>"
+                IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
+                model.img_context_token_id = tokenizer.convert_tokens_to_ids(
+                    IMG_CONTEXT_TOKEN
+                )
+                image_tokens = (
+                    IMG_START_TOKEN
+                    + (
+                        IMG_CONTEXT_TOKEN
+                        * (getattr(model, "num_image_token") * num_patches)
+                    )
+                    + IMG_END_TOKEN
+                )
+                query = text or ""
+                if "<image>" in query:
+                    query = query.replace("<image>", image_tokens, 1)
                 else:
-                    query = image_tokens + '\n' + query
+                    query = image_tokens + "\n" + query
                 batch2 = _tokenize(tokenizer, query)
                 input_ids = batch2["input_ids"].to(model.device)
                 attention_mask = batch2.get("attention_mask")
                 if attention_mask is not None:
                     attention_mask = attention_mask.to(model.device)
-                image_flags = torch.ones((num_patches, 1), device=model.device, dtype=torch.long)
+                image_flags = torch.ones(
+                    (num_patches, 1), device=model.device, dtype=torch.long
+                )
                 out = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     pixel_values=pixel_values,
                     image_flags=image_flags,
-                    output_hidden_states=True
+                    output_hidden_states=True,
                 )
             else:
                 # Text-only path: use underlying language model
-                if hasattr(model, 'language_model') and hasattr(model.language_model, 'model'):
+                if hasattr(model, "language_model") and hasattr(
+                    model.language_model, "model"
+                ):
                     out = model.language_model.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
-                        output_hidden_states=True
+                        output_hidden_states=True,
                     )
                 else:
                     out = model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
-                        output_hidden_states=True
+                        output_hidden_states=True,
                     )
         return out
 
@@ -266,10 +317,10 @@ def locate_most_safety_aware_layers(model_path: str):
     F_unsafe = []
 
     for sample in few_shot_safe:
-        text = sample['txt']
-        img_path = sample.get('img')
+        text = sample["txt"]
+        img_path = sample.get("img")
         outputs = forward_hidden(text, img_path)
-        if not hasattr(outputs, 'hidden_states') or outputs.hidden_states is None:
+        if not hasattr(outputs, "hidden_states") or outputs.hidden_states is None:
             print("Error: InternVL outputs.hidden_states is None")
             return None
         # Skip embedding layer at index 0 to match LLaVA logic
@@ -285,10 +336,10 @@ def locate_most_safety_aware_layers(model_path: str):
         F_safe.append(F_layers)
 
     for sample in few_shot_unsafe:
-        text = sample['txt']
-        img_path = sample.get('img')
+        text = sample["txt"]
+        img_path = sample.get("img")
         outputs = forward_hidden(text, img_path)
-        if not hasattr(outputs, 'hidden_states') or outputs.hidden_states is None:
+        if not hasattr(outputs, "hidden_states") or outputs.hidden_states is None:
             print("Error: InternVL outputs.hidden_states is None")
             return None
         F_layers = []
@@ -313,7 +364,9 @@ def locate_most_safety_aware_layers(model_path: str):
     # Mark the true maximum FDV layer(s)
     max_fdv = float(np.max(FDV_arr))
     most_aware_layers = [str(i) for i, v in enumerate(FDV_arr.tolist()) if v == max_fdv]
-    print("Safety awareness broadly exists at layer: " + ", ".join(positive_layers) + ".")
+    print(
+        "Safety awareness broadly exists at layer: " + ", ".join(positive_layers) + "."
+    )
     print("The most safety-aware layers are: " + ", ".join(most_aware_layers) + ".")
 
     return FDV_arr.tolist(), most_aware_layers
@@ -335,19 +388,19 @@ if __name__ == "__main__":
             "FDV": FDV,
             "most_aware_layers": most_aware_layers,
             "model_path": model_path,
-            "method": "predefined_refusal_tokens_text_only"
+            "method": "predefined_refusal_tokens_text_only",
         }
 
         os.makedirs("results", exist_ok=True)
         output_file = "results/internvl3_safety_layers.json"
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {output_file}")
 
         output_csv = "results/internvl3_safety_layers.csv"
-        with open(output_csv, 'w', newline='') as f:
+        with open(output_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["layer", "fdv", "is_most_aware"]) 
+            writer.writerow(["layer", "fdv", "is_most_aware"])
             most_aware_set = set(most_aware_layers)
             for layer_idx, fdv_value in enumerate(FDV):
                 is_most = str(layer_idx) in most_aware_set

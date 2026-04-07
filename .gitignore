@@ -7,6 +7,7 @@ __pycache__/
 # *pca.png
 # *tsne.png
 # *analysis.png
+.vscode/
 cache/
 cache_last_token/
 cache_mean_pooling/

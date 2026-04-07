@@ -6,7 +6,14 @@ import signal
 import sys
 import os
 from scipy.linalg import inv
-from sklearn.metrics import accuracy_score, roc_curve, precision_recall_curve, auc, f1_score, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    roc_curve,
+    precision_recall_curve,
+    auc,
+    f1_score,
+    confusion_matrix,
+)
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,7 +21,10 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F
 
 # Suppress warnings for cleaner output
-warnings.filterwarnings("ignore", message=".*copying from a non-meta parameter in the checkpoint to a meta parameter.*")
+warnings.filterwarnings(
+    "ignore",
+    message=".*copying from a non-meta parameter in the checkpoint to a meta parameter.*",
+)
 warnings.filterwarnings("ignore", message=".*resume_download.*is deprecated.*")
 warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
 warnings.filterwarnings("ignore", message=".*Palette images with Transparency.*")
@@ -27,6 +37,7 @@ from llava.constants import IMAGE_TOKEN_INDEX
 
 # Smart import handling based on command line arguments and available dependencies
 import sys
+
 
 # ============================================================================
 # GLOBAL CONFIGURATION
@@ -46,7 +57,7 @@ class ProjectionConfig:
     PROJECTION_EPOCHS = 100
     PROJECTION_BATCH_SIZE = 64
     PROJECTION_LEARNING_RATE = 1e-3
-    PROJECTION_LR_SCHEDULER = 'cosine'
+    PROJECTION_LR_SCHEDULER = "cosine"
     PROJECTION_STEP_SIZE = 25
     PROJECTION_GAMMA = 0.5
     PROJECTION_COSINE_MIN_LR_FACTOR = 0.05
@@ -59,13 +70,15 @@ class ProjectionConfig:
     DROPOUT = 0.3
 
     # Loss weighting settings
-    DATASET_LOSS_WEIGHT = 1.0      # Weight for dataset classification loss
-    TOXICITY_LOSS_WEIGHT = 5.0     # Weight for toxicity detection loss (higher to balance magnitude)
+    DATASET_LOSS_WEIGHT = 1.0  # Weight for dataset classification loss
+    TOXICITY_LOSS_WEIGHT = (
+        5.0  # Weight for toxicity detection loss (higher to balance magnitude)
+    )
 
     @classmethod
     def set_model_dimensions(cls, model_type, input_dim=None):
         """Set input dimensions based on model type and actual feature dimensions"""
-        if model_type.lower() == 'qwen':
+        if model_type.lower() == "qwen":
             # Use actual input dimension if provided, otherwise use default
             cls.INPUT_DIM = input_dim if input_dim is not None else 2048
             cls.OUTPUT_DIM = 256  # Reduce output dimension for Qwen
@@ -78,34 +91,43 @@ class ProjectionConfig:
     @classmethod
     def print_config(cls):
         """Print current configuration"""
-        print("="*80)
+        print("=" * 80)
         print("PROJECTION CONFIGURATION")
-        print("="*80)
+        print("=" * 80)
         print(f"Mode: {cls.PROJECTION_MODE}")
         if cls.PROJECTION_MODE == "single_layer":
             print(f"Training layer: {cls.SINGLE_LAYER_TRAINING_LAYER}")
         print(f"Architecture: {cls.INPUT_DIM} -> {cls.HIDDEN_DIM} -> {cls.OUTPUT_DIM}")
-        print(f"Training: {cls.PROJECTION_EPOCHS} epochs, batch_size={cls.PROJECTION_BATCH_SIZE}")
-        print(f"Learning rate: {cls.PROJECTION_LEARNING_RATE} (scheduler={cls.PROJECTION_LR_SCHEDULER}, "
-              f"cosine_factor={cls.PROJECTION_COSINE_MIN_LR_FACTOR}, step_size={cls.PROJECTION_STEP_SIZE}, gamma={cls.PROJECTION_GAMMA})")
-        print(f"Loss weights: Dataset={cls.DATASET_LOSS_WEIGHT}, Toxicity={cls.TOXICITY_LOSS_WEIGHT}")
-        print("="*80)
+        print(
+            f"Training: {cls.PROJECTION_EPOCHS} epochs, batch_size={cls.PROJECTION_BATCH_SIZE}"
+        )
+        print(
+            f"Learning rate: {cls.PROJECTION_LEARNING_RATE} (scheduler={cls.PROJECTION_LR_SCHEDULER}, "
+            f"cosine_factor={cls.PROJECTION_COSINE_MIN_LR_FACTOR}, step_size={cls.PROJECTION_STEP_SIZE}, gamma={cls.PROJECTION_GAMMA})"
+        )
+        print(
+            f"Loss weights: Dataset={cls.DATASET_LOSS_WEIGHT}, Toxicity={cls.TOXICITY_LOSS_WEIGHT}"
+        )
+        print("=" * 80)
+
 
 def detect_model_from_args():
     """Detect model type from command line arguments"""
     # Look for --model or -m argument
     for i, arg in enumerate(sys.argv):
-        if arg in ['--model', '-m'] and i + 1 < len(sys.argv):
+        if arg in ["--model", "-m"] and i + 1 < len(sys.argv):
             model_type = sys.argv[i + 1].lower()
-            if model_type in ['qwen', 'llava', 'internvl']:
+            if model_type in ["qwen", "llava", "internvl"]:
                 return model_type
         # Also check for direct model arguments (backward compatibility)
-        elif arg.lower() in ['qwen', 'llava', 'internvl'] and i > 0:
+        elif arg.lower() in ["qwen", "llava", "internvl"] and i > 0:
             return arg.lower()
-    return 'llava'  # Default
+    return "llava"  # Default
+
 
 # Determine which model we're using
 REQUESTED_MODEL = detect_model_from_args()
+
 
 def parse_requested_layers():
     """Parse optional --layers argument (comma-separated indices)."""
@@ -123,7 +145,7 @@ def parse_requested_layers():
             for name in arg_names:
                 prefix = f"{name}="
                 if arg.startswith(prefix):
-                    layer_arg = arg[len(prefix):]
+                    layer_arg = arg[len(prefix) :]
                     break
             break
 
@@ -131,7 +153,11 @@ def parse_requested_layers():
         return None
 
     try:
-        layers = sorted(set(int(part.strip()) for part in layer_arg.split(",") if part.strip() != ""))
+        layers = sorted(
+            set(
+                int(part.strip()) for part in layer_arg.split(",") if part.strip() != ""
+            )
+        )
     except ValueError:
         print(f"Warning: Invalid --layers specification '{layer_arg}'. Ignoring.")
         return None
@@ -142,13 +168,15 @@ def parse_requested_layers():
 
     return layers
 
+
 REQUESTED_LAYERS = parse_requested_layers()
+
 
 def parse_token_strategy():
     """Parse optional --token-strategy argument."""
-    default_strategy = 'last_token'
+    default_strategy = "last_token"
     arg_names = {"--token-strategy", "--token_strategy"}
-    valid_strategies = {'last_token', 'mean_pool', 'last_5_tokens'}
+    valid_strategies = {"last_token", "mean_pool", "last_5_tokens"}
     selected_strategy = default_strategy
 
     for idx, arg in enumerate(sys.argv):
@@ -158,32 +186,40 @@ def parse_token_strategy():
                 if candidate in valid_strategies:
                     selected_strategy = candidate
                 else:
-                    print(f"Warning: Invalid token strategy '{candidate}'. Using default '{default_strategy}'.")
+                    print(
+                        f"Warning: Invalid token strategy '{candidate}'. Using default '{default_strategy}'."
+                    )
             else:
-                print(f"Warning: {arg} flag provided without a value. Using default '{default_strategy}'.")
+                print(
+                    f"Warning: {arg} flag provided without a value. Using default '{default_strategy}'."
+                )
             break
         elif any(arg.startswith(name + "=") for name in arg_names):
             for name in arg_names:
                 prefix = f"{name}="
                 if arg.startswith(prefix):
-                    candidate = arg[len(prefix):].lower()
+                    candidate = arg[len(prefix) :].lower()
                     if candidate in valid_strategies:
                         selected_strategy = candidate
                     else:
-                        print(f"Warning: Invalid token strategy '{candidate}'. Using default '{default_strategy}'.")
+                        print(
+                            f"Warning: Invalid token strategy '{candidate}'. Using default '{default_strategy}'."
+                        )
                     break
             break
 
     return selected_strategy
 
+
 TOKEN_STRATEGY = parse_token_strategy()
 
 # Import appropriate dependencies based on requested model
-if REQUESTED_MODEL == 'qwen':
+if REQUESTED_MODEL == "qwen":
     try:
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
         from qwen_vl_utils import process_vision_info
         from feature_extractor_qwen import HiddenStateExtractor
+
         QWEN_AVAILABLE = True
         LLAVA_AVAILABLE = False
         INTERNVL_AVAILABLE = False
@@ -192,9 +228,10 @@ if REQUESTED_MODEL == 'qwen':
         print(f"Error: Qwen dependencies not available: {e}")
         print("Please install: pip install qwen-vl-utils transformers>=4.37.0")
         sys.exit(1)
-elif REQUESTED_MODEL == 'internvl':
+elif REQUESTED_MODEL == "internvl":
     try:
         from feature_extractor_internvl import HiddenStateExtractor
+
         QWEN_AVAILABLE = False
         LLAVA_AVAILABLE = False
         INTERNVL_AVAILABLE = True
@@ -206,6 +243,7 @@ elif REQUESTED_MODEL == 'internvl':
 else:
     try:
         from feature_extractor import HiddenStateExtractor
+
         LLAVA_AVAILABLE = True
         QWEN_AVAILABLE = False
         INTERNVL_AVAILABLE = False
@@ -215,15 +253,18 @@ else:
         print("Please install LLaVA dependencies")
         sys.exit(1)
 
+
 def get_model_specific_extractor(model_path, model_type):
     """Get the appropriate feature extractor based on model type"""
     # Since we've already imported the correct HiddenStateExtractor based on model type,
     # we can just use it directly
     return HiddenStateExtractor(model_path)
 
+
 # Global config instance
 CONFIG = ProjectionConfig()
 CACHE_EXPERIMENT_NAME = "balanced_ml_detection"
+
 
 def setup_gpu_environment():
     if torch.cuda.is_available():
@@ -241,13 +282,15 @@ def setup_gpu_environment():
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
 
-        return torch.device('cuda:0')  # Primary GPU
+        return torch.device("cuda:0")  # Primary GPU
     else:
         print("CUDA not available, falling back to CPU")
-        return torch.device('cpu')
+        return torch.device("cpu")
+
 
 # Initialize GPU
 GPU_DEVICE = setup_gpu_environment()
+
 
 def cleanup_gpu_memory():
     """Clean up GPU memory"""
@@ -255,13 +298,15 @@ def cleanup_gpu_memory():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+
 def get_gpu_memory_info():
     """Get GPU memory usage information"""
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-        reserved = torch.cuda.memory_reserved() / 1024**3   # GB
+        reserved = torch.cuda.memory_reserved() / 1024**3  # GB
         return f"GPU Memory: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved"
     return "GPU not available"
+
 
 class LearnedProjection(nn.Module):
     """
@@ -289,14 +334,12 @@ class LearnedProjection(nn.Module):
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.BatchNorm1d(hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-
             nn.Linear(hidden_dim // 2, output_dim),
-            nn.BatchNorm1d(output_dim)
+            nn.BatchNorm1d(output_dim),
         )
 
         # Initialize weights
@@ -314,9 +357,19 @@ class LearnedProjection(nn.Module):
         """Forward pass through projection network"""
         return self.projection(x)
 
-def train_learned_projection(features_dict, labels_dict, input_dim=None, output_dim=None,
-                           epochs=None, batch_size=None, learning_rate=None, device=None,
-                           lr_scheduler=None, random_seed=42):
+
+def train_learned_projection(
+    features_dict,
+    labels_dict,
+    input_dim=None,
+    output_dim=None,
+    epochs=None,
+    batch_size=None,
+    learning_rate=None,
+    device=None,
+    lr_scheduler=None,
+    random_seed=42,
+):
     """
     Train the learned projection network
 
@@ -356,7 +409,9 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
     torch.backends.cudnn.benchmark = False
 
     print(f"Training learned projection: {input_dim} -> {output_dim} dimensions")
-    print(f"Device: {device}, Epochs: {epochs}, Batch size: {batch_size}, LR: {learning_rate}")
+    print(
+        f"Device: {device}, Epochs: {epochs}, Batch size: {batch_size}, LR: {learning_rate}"
+    )
     print(f"Random seed: {random_seed} (deterministic mode enabled)")
 
     all_features = []
@@ -373,7 +428,9 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
         labels_array = np.array(labels_dict[dataset_name])
 
         if len(features_array) != len(labels_array):
-            print(f"Warning: Feature-label mismatch for {dataset_name}: {len(features_array)} vs {len(labels_array)}")
+            print(
+                f"Warning: Feature-label mismatch for {dataset_name}: {len(features_array)} vs {len(labels_array)}"
+            )
             continue
 
         # Assign dataset ID
@@ -382,7 +439,9 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
             dataset_id += 1
 
         all_features.append(features_array)
-        all_dataset_labels.extend([dataset_name_to_id[dataset_name]] * len(features_array))
+        all_dataset_labels.extend(
+            [dataset_name_to_id[dataset_name]] * len(features_array)
+        )
         all_toxicity_labels.extend(labels_array.tolist())
 
     all_features = np.vstack(all_features)
@@ -391,20 +450,30 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
 
     actual_input_dim = all_features.shape[1]
     if input_dim is None or input_dim != actual_input_dim:
-        print(f"Updating input dimension from {input_dim} to {actual_input_dim} based on actual features")
+        print(
+            f"Updating input dimension from {input_dim} to {actual_input_dim} based on actual features"
+        )
         input_dim = actual_input_dim
 
     features_tensor = torch.FloatTensor(all_features).to(device)
     dataset_labels_tensor = torch.LongTensor(all_dataset_labels).to(device)
     toxicity_labels_tensor = torch.LongTensor(all_toxicity_labels).to(device)
 
-    dataset = TensorDataset(features_tensor, dataset_labels_tensor, toxicity_labels_tensor)
+    dataset = TensorDataset(
+        features_tensor, dataset_labels_tensor, toxicity_labels_tensor
+    )
 
     generator = torch.Generator()
     generator.manual_seed(random_seed)
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True,
-                          generator=generator, worker_init_fn=lambda worker_id: np.random.seed(random_seed + worker_id))
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True,
+        generator=generator,
+        worker_init_fn=lambda worker_id: np.random.seed(random_seed + worker_id),
+    )
 
     model = LearnedProjection(input_dim=input_dim, output_dim=output_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -416,32 +485,36 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
     step_size = CONFIG.PROJECTION_STEP_SIZE
     gamma = CONFIG.PROJECTION_GAMMA
     cosine_eta_min = learning_rate * CONFIG.PROJECTION_COSINE_MIN_LR_FACTOR
-    scheduler_name = (lr_scheduler or CONFIG.PROJECTION_LR_SCHEDULER or 'cosine').lower()
+    scheduler_name = (
+        lr_scheduler or CONFIG.PROJECTION_LR_SCHEDULER or "cosine"
+    ).lower()
 
-    if scheduler_name == 'step':
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+    if scheduler_name == "step":
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer, step_size=step_size, gamma=gamma
+        )
         print(f"Using Step LR scheduler (step_size={step_size}, gamma={gamma})")
         scheduler_log_interval = max(step_size, 1)
-    elif scheduler_name == 'cosine':
+    elif scheduler_name == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=epochs,
-            eta_min=cosine_eta_min
+            optimizer, T_max=epochs, eta_min=cosine_eta_min
         )
-        print(f"Using Cosine Annealing LR scheduler (T_max={epochs}, eta_min={cosine_eta_min:.6f})")
+        print(
+            f"Using Cosine Annealing LR scheduler (T_max={epochs}, eta_min={cosine_eta_min:.6f})"
+        )
         scheduler_log_interval = max(epochs // 5, 1)
     else:
-        print(f"Warning: Unknown scheduler '{scheduler_name}'. Falling back to Cosine Annealing.")
-        scheduler_name = 'cosine'
+        print(
+            f"Warning: Unknown scheduler '{scheduler_name}'. Falling back to Cosine Annealing."
+        )
+        scheduler_name = "cosine"
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=epochs,
-            eta_min=cosine_eta_min
+            optimizer, T_max=epochs, eta_min=cosine_eta_min
         )
         scheduler_log_interval = max(epochs // 5, 1)
 
     model.train()
-    best_loss = float('inf')
+    best_loss = float("inf")
     patience_counter = 0
     max_patience = 20
     prev_lr = learning_rate
@@ -473,8 +546,16 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
 
             # Accumulate losses
             epoch_loss += total_loss.item()
-            epoch_dataset_loss += dataset_loss if isinstance(dataset_loss, (int, float)) else dataset_loss.item()
-            epoch_toxicity_loss += toxicity_loss if isinstance(toxicity_loss, (int, float)) else toxicity_loss.item()
+            epoch_dataset_loss += (
+                dataset_loss
+                if isinstance(dataset_loss, (int, float))
+                else dataset_loss.item()
+            )
+            epoch_toxicity_loss += (
+                toxicity_loss
+                if isinstance(toxicity_loss, (int, float))
+                else toxicity_loss.item()
+            )
             num_batches += 1
 
         # Average losses
@@ -486,19 +567,24 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
         scheduler.step()
 
         # Print progress with learning rate information
-        current_lr = optimizer.param_groups[0]['lr']
+        current_lr = optimizer.param_groups[0]["lr"]
         if (epoch + 1) % 30 == 0 or epoch == 0:
             # Calculate weighted components for display
             weighted_dataset = CONFIG.DATASET_LOSS_WEIGHT * avg_dataset_loss
             weighted_toxicity = CONFIG.TOXICITY_LOSS_WEIGHT * avg_toxicity_loss
-            print(f"Epoch {epoch+1}/{epochs}: Loss={avg_loss:.4f} "
-                  f"(Dataset={avg_dataset_loss:.4f}*{CONFIG.DATASET_LOSS_WEIGHT}={weighted_dataset:.4f}, "
-                  f"Toxicity={avg_toxicity_loss:.4f}*{CONFIG.TOXICITY_LOSS_WEIGHT}={weighted_toxicity:.4f}), "
-                  f"LR={current_lr:.6f}")
+            print(
+                f"Epoch {epoch + 1}/{epochs}: Loss={avg_loss:.4f} "
+                f"(Dataset={avg_dataset_loss:.4f}*{CONFIG.DATASET_LOSS_WEIGHT}={weighted_dataset:.4f}, "
+                f"Toxicity={avg_toxicity_loss:.4f}*{CONFIG.TOXICITY_LOSS_WEIGHT}={weighted_toxicity:.4f}), "
+                f"LR={current_lr:.6f}"
+            )
 
         # Log learning rate changes periodically
-        if (epoch > 0 and abs(current_lr - prev_lr) > 1e-8 and
-                ((epoch + 1) % scheduler_log_interval == 0 or epoch == epochs - 1)):
+        if (
+            epoch > 0
+            and abs(current_lr - prev_lr) > 1e-8
+            and ((epoch + 1) % scheduler_log_interval == 0 or epoch == epochs - 1)
+        ):
             print(f"  Learning rate changed: {prev_lr:.6f} -> {current_lr:.6f}")
         prev_lr = current_lr
 
@@ -510,7 +596,7 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
             patience_counter += 1
 
         if patience_counter >= max_patience:
-            print(f"Early stopping at epoch {epoch+1}")
+            print(f"Early stopping at epoch {epoch + 1}")
             break
 
     print(f"Training completed. Best loss: {best_loss:.4f}")
@@ -518,6 +604,7 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
     model.eval()
 
     return model, dataset_name_to_id
+
 
 def apply_learned_projection(model, features_dict, device=None):
     """
@@ -549,7 +636,7 @@ def apply_learned_projection(model, features_dict, device=None):
             projected_features = []
 
             for i in range(0, len(features_array), batch_size):
-                batch_features = features_array[i:i+batch_size]
+                batch_features = features_array[i : i + batch_size]
                 batch_tensor = torch.FloatTensor(batch_features).to(device)
 
                 # Apply projection
@@ -569,9 +656,15 @@ def apply_learned_projection(model, features_dict, device=None):
 
     return projected_features_dict
 
-def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
-                           margin_dataset=1.0, margin_toxicity=2.0,
-                           temperature=0.1):
+
+def compute_contrastive_loss(
+    embeddings,
+    dataset_labels,
+    toxicity_labels,
+    margin_dataset=1.0,
+    margin_toxicity=2.0,
+    temperature=0.1,
+):
     """
     Compute multi-objective contrastive loss:
     1. Dataset clustering: same dataset samples close, different dataset samples far
@@ -593,7 +686,9 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
         distances = torch.cdist(embeddings, embeddings, p=2)
 
         # Create masks for same/different datasets
-        dataset_same_mask = (dataset_labels.unsqueeze(0) == dataset_labels.unsqueeze(1)).float()
+        dataset_same_mask = (
+            dataset_labels.unsqueeze(0) == dataset_labels.unsqueeze(1)
+        ).float()
         dataset_diff_mask = 1.0 - dataset_same_mask
 
         # Remove diagonal (self-comparisons)
@@ -603,12 +698,16 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
 
         # Dataset clustering loss: minimize intra-dataset distances, maximize inter-dataset distances
         if dataset_same_mask.sum() > 0:
-            intra_dataset_loss = (distances * dataset_same_mask).sum() / dataset_same_mask.sum()
+            intra_dataset_loss = (
+                distances * dataset_same_mask
+            ).sum() / dataset_same_mask.sum()
         else:
             intra_dataset_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
         if dataset_diff_mask.sum() > 0:
-            inter_dataset_loss = torch.clamp(margin_dataset - distances, min=0) * dataset_diff_mask
+            inter_dataset_loss = (
+                torch.clamp(margin_dataset - distances, min=0) * dataset_diff_mask
+            )
             inter_dataset_loss = inter_dataset_loss.sum() / dataset_diff_mask.sum()
         else:
             inter_dataset_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -623,8 +722,8 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
 
     if len(unique_toxicity) > 1:
         # Compute centroids for each toxicity class
-        benign_mask = (toxicity_labels == 0)
-        malicious_mask = (toxicity_labels == 1)
+        benign_mask = toxicity_labels == 0
+        malicious_mask = toxicity_labels == 1
 
         if benign_mask.sum() > 0 and malicious_mask.sum() > 0:
             benign_embeddings = embeddings[benign_mask]
@@ -635,25 +734,24 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
 
             # Distance between benign and malicious centroids (should be large)
             centroid_distance = F.pairwise_distance(
-                benign_centroid.unsqueeze(0),
-                malicious_centroid.unsqueeze(0)
+                benign_centroid.unsqueeze(0), malicious_centroid.unsqueeze(0)
             )
 
             # Loss: maximize distance between centroids
-            toxicity_loss = torch.clamp(margin_toxicity - centroid_distance, min=0).mean()
+            toxicity_loss = torch.clamp(
+                margin_toxicity - centroid_distance, min=0
+            ).mean()
 
             # Add intra-class compactness
             if len(benign_embeddings) > 1:
                 benign_distances = torch.norm(
-                    benign_embeddings - benign_centroid.unsqueeze(0),
-                    dim=1
+                    benign_embeddings - benign_centroid.unsqueeze(0), dim=1
                 )
                 toxicity_loss = toxicity_loss + benign_distances.mean()
 
             if len(malicious_embeddings) > 1:
                 malicious_distances = torch.norm(
-                    malicious_embeddings - malicious_centroid.unsqueeze(0),
-                    dim=1
+                    malicious_embeddings - malicious_centroid.unsqueeze(0), dim=1
                 )
                 toxicity_loss = toxicity_loss + malicious_distances.mean()
 
@@ -663,6 +761,7 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
     total_loss = weighted_dataset_loss + weighted_toxicity_loss
 
     return total_loss, dataset_loss, toxicity_loss
+
 
 def compute_optimal_shrinkage(n, d, trace_cov, frobenius_sq):
     """Ledoit-Wolf (2004) analytical optimal shrinkage intensity.
@@ -685,7 +784,7 @@ def compute_optimal_shrinkage(n, d, trace_cov, frobenius_sq):
     """
     if n <= 1:
         return 1.0
-    trace_sq = trace_cov ** 2
+    trace_sq = trace_cov**2
     denominator = (n + 2) * (frobenius_sq - trace_sq / d)
     if denominator <= 0:
         # S is already proportional to identity (all eigenvalues equal);
@@ -694,12 +793,15 @@ def compute_optimal_shrinkage(n, d, trace_cov, frobenius_sq):
     numerator = (n - 2) / n * frobenius_sq + trace_sq
     return min(1.0, max(0.0, numerator / denominator))
 
+
 def enhanced_ledoit_wolf_covariance(X, min_samples=50):
     """Enhanced Ledoit-Wolf covariance estimator with minimum sample size validation"""
     n, d = X.shape
 
     if n <= 1:
-        raise ValueError(f"Cannot compute covariance with only {n} sample(s). Need at least 2 samples.")
+        raise ValueError(
+            f"Cannot compute covariance with only {n} sample(s). Need at least 2 samples."
+        )
 
     if n < min_samples:
         raise ValueError(
@@ -717,7 +819,7 @@ def enhanced_ledoit_wolf_covariance(X, min_samples=50):
     target = (trace_cov / d) * np.eye(d)
 
     # Step 3: Ledoit-Wolf analytical optimal shrinkage intensity
-    frobenius_sq = np.sum(sample_cov ** 2)
+    frobenius_sq = np.sum(sample_cov**2)
     lambda_opt = compute_optimal_shrinkage(n, d, trace_cov, frobenius_sq)
 
     # Step 4: Shrunk estimator
@@ -725,9 +827,11 @@ def enhanced_ledoit_wolf_covariance(X, min_samples=50):
 
     return shrunk_cov
 
+
 def ledoit_wolf_covariance(X):
     """Original Ledoit-Wolf covariance estimator"""
     return enhanced_ledoit_wolf_covariance(X, min_samples=50)
+
 
 def enhanced_ledoit_wolf_covariance_gpu(X, min_samples=50, device=None):
     """GPU-accelerated Enhanced Ledoit-Wolf covariance estimator with minimum sample size validation"""
@@ -738,7 +842,9 @@ def enhanced_ledoit_wolf_covariance_gpu(X, min_samples=50, device=None):
     # print(f"    GPU covariance computation: {n} samples, {d} dimensions")
 
     if n <= 1:
-        raise ValueError(f"Cannot compute covariance with only {n} sample(s). Need at least 2 samples.")
+        raise ValueError(
+            f"Cannot compute covariance with only {n} sample(s). Need at least 2 samples."
+        )
 
     if n < min_samples:
         raise ValueError(
@@ -761,13 +867,14 @@ def enhanced_ledoit_wolf_covariance_gpu(X, min_samples=50, device=None):
 
     # Ledoit-Wolf analytical optimal shrinkage intensity.
     # Extract two scalars from the GPU tensor — negligible transfer cost.
-    frobenius_sq = torch.sum(sample_cov_gpu ** 2)
+    frobenius_sq = torch.sum(sample_cov_gpu**2)
     lambda_opt = compute_optimal_shrinkage(n, d, trace_cov.item(), frobenius_sq.item())
 
     # Shrunk estimator (all on GPU)
     shrunk_cov_gpu = (1 - lambda_opt) * sample_cov_gpu + lambda_opt * target_gpu
 
     return shrunk_cov_gpu.cpu().numpy()
+
 
 def compute_matrix_inverse_gpu(matrix, device=None):
     """GPU-accelerated matrix inversion with fallback"""
@@ -794,6 +901,7 @@ def compute_matrix_inverse_gpu(matrix, device=None):
         print(f"    GPU matrix inversion failed: {e}, using CPU pseudo-inverse")
         return np.linalg.pinv(matrix)
 
+
 def _mahalanobis_distance_gpu_tensors(X_gpu, mean_gpu, cov_inv_gpu):
     """Compute batch Mahalanobis distances from pre-converted GPU tensors.
 
@@ -807,10 +915,10 @@ def _mahalanobis_distance_gpu_tensors(X_gpu, mean_gpu, cov_inv_gpu):
     Returns:
         (N,) GPU tensor of Mahalanobis distances
     """
-    diff = X_gpu - mean_gpu.unsqueeze(0)          # (N, D)
-    temp = torch.matmul(diff, cov_inv_gpu)         # (N, D)
-    dist_sq = torch.sum(temp * diff, dim=1)        # (N,)
-    return torch.sqrt(torch.clamp(dist_sq, min=0)) # (N,)
+    diff = X_gpu - mean_gpu.unsqueeze(0)  # (N, D)
+    temp = torch.matmul(diff, cov_inv_gpu)  # (N, D)
+    dist_sq = torch.sum(temp * diff, dim=1)  # (N,)
+    return torch.sqrt(torch.clamp(dist_sq, min=0))  # (N,)
 
 
 def mahalanobis_distance_batch_gpu(X, mean, cov_inv, device=None):
@@ -825,7 +933,11 @@ def mahalanobis_distance_batch_gpu(X, mean, cov_inv, device=None):
         mean_gpu = torch.tensor(mean, dtype=torch.float64, device=device)
         cov_inv_gpu = torch.tensor(cov_inv, dtype=torch.float64, device=device)
 
-        return _mahalanobis_distance_gpu_tensors(X_gpu, mean_gpu, cov_inv_gpu).cpu().numpy()
+        return (
+            _mahalanobis_distance_gpu_tensors(X_gpu, mean_gpu, cov_inv_gpu)
+            .cpu()
+            .numpy()
+        )
 
     except Exception as e:
         print(f"    GPU Mahalanobis distance failed: {e}, using CPU fallback")
@@ -842,8 +954,8 @@ def mahalanobis_distance_batch_gpu(X, mean, cov_inv, device=None):
                 distances.append(np.linalg.norm(diff))
         return np.array(distances)
 
-class MCDDetector:
 
+class MCDDetector:
     def __init__(self, use_gpu=True):
         self.in_distribution_clusters = {}  # {cluster_name: {'mean': ..., 'cov_inv': ...}}
         self.ood_clusters = {}  # {attack_type: {'mean': ..., 'cov_inv': ...}}
@@ -857,7 +969,7 @@ class MCDDetector:
             print(f"    MCDDetector initialized with GPU acceleration on {GPU_DEVICE}")
         else:
             print("    MCDDetector initialized with CPU computation")
-        
+
     def _compute_cluster_stats(self, features):
         """Compute mean and inverse covariance for a cluster of features using GPU-accelerated Ledoit-Wolf shrinkage"""
         features = np.array(features)
@@ -890,7 +1002,7 @@ class MCDDetector:
                 cov_inv = np.eye(features.shape[1])
 
         return mean, cov_inv
-    
+
     def _mahalanobis_distance(self, x, mean, cov_inv):
         """Compute Mahalanobis distance with GPU acceleration option"""
         if self.use_gpu:
@@ -919,11 +1031,11 @@ class MCDDetector:
             for x in X:
                 distances.append(self._mahalanobis_distance(x, mean, cov_inv))
             return np.array(distances)
-    
+
     def fit_in_distribution(self, in_dist_data):
         """
         Fit in-distribution clusters.
-        
+
         Args:
             in_dist_data: Dict of {cluster_name: list_of_features}
         """
@@ -932,23 +1044,29 @@ class MCDDetector:
             if len(features) > 1:  # Need at least 2 samples for covariance
                 mean, cov_inv = self._compute_cluster_stats(features)
                 self.in_distribution_clusters[cluster_name] = {
-                    'mean': mean,
-                    'cov_inv': cov_inv,
-                    'size': len(features)
+                    "mean": mean,
+                    "cov_inv": cov_inv,
+                    "size": len(features),
                 }
                 if self.use_gpu:
                     self.in_distribution_clusters_gpu[cluster_name] = {
-                        'mean': torch.tensor(mean, dtype=torch.float64, device=GPU_DEVICE),
-                        'cov_inv': torch.tensor(cov_inv, dtype=torch.float64, device=GPU_DEVICE),
+                        "mean": torch.tensor(
+                            mean, dtype=torch.float64, device=GPU_DEVICE
+                        ),
+                        "cov_inv": torch.tensor(
+                            cov_inv, dtype=torch.float64, device=GPU_DEVICE
+                        ),
                     }
                 # print(f"  {cluster_name}: {len(features)} samples, dim={len(mean)}")
             else:
-                print(f"  Warning: {cluster_name} has only {len(features)} samples, skipping")
-    
+                print(
+                    f"  Warning: {cluster_name} has only {len(features)} samples, skipping"
+                )
+
     def fit_ood_clusters(self, ood_data):
         """
         Fit OOD clusters for different attack types.
-        
+
         Args:
             ood_data: Dict of {attack_type: list_of_features}
         """
@@ -957,41 +1075,51 @@ class MCDDetector:
             if len(features) > 1:  # Need at least 2 samples for covariance
                 mean, cov_inv = self._compute_cluster_stats(features)
                 self.ood_clusters[attack_type] = {
-                    'mean': mean,
-                    'cov_inv': cov_inv,
-                    'size': len(features)
+                    "mean": mean,
+                    "cov_inv": cov_inv,
+                    "size": len(features),
                 }
                 if self.use_gpu:
                     self.ood_clusters_gpu[attack_type] = {
-                        'mean': torch.tensor(mean, dtype=torch.float64, device=GPU_DEVICE),
-                        'cov_inv': torch.tensor(cov_inv, dtype=torch.float64, device=GPU_DEVICE),
+                        "mean": torch.tensor(
+                            mean, dtype=torch.float64, device=GPU_DEVICE
+                        ),
+                        "cov_inv": torch.tensor(
+                            cov_inv, dtype=torch.float64, device=GPU_DEVICE
+                        ),
                     }
                 # print(f"  {attack_type}: {len(features)} samples, dim={len(mean)}")
             else:
-                print(f"  Warning: {attack_type} has only {len(features)} samples, skipping")
-    
+                print(
+                    f"  Warning: {attack_type} has only {len(features)} samples, skipping"
+                )
+
     def _compute_min_in_dist_distance(self, x):
         """Compute minimum Mahalanobis distance to any in-distribution cluster"""
         if not self.in_distribution_clusters:
-            return float('inf')
-            
-        min_distance = float('inf')
+            return float("inf")
+
+        min_distance = float("inf")
         for cluster_name, cluster_stats in self.in_distribution_clusters.items():
-            distance = self._mahalanobis_distance(x, cluster_stats['mean'], cluster_stats['cov_inv'])
+            distance = self._mahalanobis_distance(
+                x, cluster_stats["mean"], cluster_stats["cov_inv"]
+            )
             min_distance = min(min_distance, distance)
         return min_distance
-    
+
     def _compute_min_ood_distance(self, x):
         """Compute minimum Mahalanobis distance to any OOD cluster"""
         if not self.ood_clusters:
-            return float('inf')
-            
-        min_distance = float('inf')
+            return float("inf")
+
+        min_distance = float("inf")
         for attack_type, cluster_stats in self.ood_clusters.items():
-            distance = self._mahalanobis_distance(x, cluster_stats['mean'], cluster_stats['cov_inv'])
+            distance = self._mahalanobis_distance(
+                x, cluster_stats["mean"], cluster_stats["cov_inv"]
+            )
             min_distance = min(min_distance, distance)
         return min_distance
-    
+
     def compute_ood_score(self, x):
         """
         Compute outlier score for a sample.
@@ -1018,7 +1146,7 @@ class MCDDetector:
         score = np.clip(score, -10000, 10000)
 
         return score
-    
+
     def fit_threshold(self, validation_features, validation_labels):
         """Find optimal threshold using validation data with domain shift awareness"""
         # Use batch computation for speed
@@ -1040,10 +1168,15 @@ class MCDDetector:
         malicious_scores = scores[validation_labels == 1]
 
         benign_mean, benign_std = np.mean(benign_scores), np.std(benign_scores)
-        malicious_mean, malicious_std = np.mean(malicious_scores), np.std(malicious_scores)
+        malicious_mean, malicious_std = (
+            np.mean(malicious_scores),
+            np.std(malicious_scores),
+        )
 
         # Calculate separation between distributions
-        separation = abs(malicious_mean - benign_mean) / (benign_std + malicious_std + 1e-8)
+        separation = abs(malicious_mean - benign_mean) / (
+            benign_std + malicious_std + 1e-8
+        )
 
         print(f"  Validation score separation: {separation:.2f} (higher is better)")
 
@@ -1053,15 +1186,21 @@ class MCDDetector:
             midpoint = (benign_mean + malicious_mean) / 2
             range_width = min(benign_std, malicious_std) * 2
             score_range = [midpoint - range_width, midpoint + range_width]
-            print(f"  Using narrow threshold range around midpoint: [{score_range[0]:.2f}, {score_range[1]:.2f}]")
+            print(
+                f"  Using narrow threshold range around midpoint: [{score_range[0]:.2f}, {score_range[1]:.2f}]"
+            )
         else:  # Overlapping distributions - use wider range
             score_range = np.percentile(scores, [5, 95])
             range_width = score_range[1] - score_range[0]
             score_range[0] -= 0.2 * range_width
             score_range[1] += 0.2 * range_width
-            print(f"  Using wide threshold range for overlapping distributions: [{score_range[0]:.2f}, {score_range[1]:.2f}]")
+            print(
+                f"  Using wide threshold range for overlapping distributions: [{score_range[0]:.2f}, {score_range[1]:.2f}]"
+            )
 
-        thresholds = np.linspace(score_range[0], score_range[1], 200)  # More granular search
+        thresholds = np.linspace(
+            score_range[0], score_range[1], 200
+        )  # More granular search
         best_score = 0
         best_threshold = 0.0
         best_f1 = 0
@@ -1085,14 +1224,18 @@ class MCDDetector:
             except:
                 continue
 
-        print(f"  Optimal threshold: {best_threshold:.4f} (Balanced Acc: {best_balanced_acc:.4f}, F1: {best_f1:.4f})")
+        print(
+            f"  Optimal threshold: {best_threshold:.4f} (Balanced Acc: {best_balanced_acc:.4f}, F1: {best_f1:.4f})"
+        )
 
         self.threshold = best_threshold
         return best_threshold
-    
+
     def predict(self, features):
         """Predict whether samples are OOD (jailbreak) with GPU batch optimization"""
-        if self.use_gpu and len(features) > 10:  # Use batch processing for larger datasets
+        if (
+            self.use_gpu and len(features) > 10
+        ):  # Use batch processing for larger datasets
             scores = self._compute_ood_scores_batch(features)
         else:
             scores = np.array([self.compute_ood_score(x) for x in features])
@@ -1107,16 +1250,26 @@ class MCDDetector:
         if self.use_gpu and self.in_distribution_clusters_gpu:
             # Convert test features to GPU once; loop over pre-cached cluster tensors.
             # This replaces N_clusters separate CPU→GPU transfers with a single one.
-            features_gpu = torch.tensor(features, dtype=torch.float64, device=GPU_DEVICE)
+            features_gpu = torch.tensor(
+                features, dtype=torch.float64, device=GPU_DEVICE
+            )
 
-            in_dist_distances_gpu = torch.full((batch_size,), float('inf'), dtype=torch.float64, device=GPU_DEVICE)
+            in_dist_distances_gpu = torch.full(
+                (batch_size,), float("inf"), dtype=torch.float64, device=GPU_DEVICE
+            )
             for stats_gpu in self.in_distribution_clusters_gpu.values():
-                dists = _mahalanobis_distance_gpu_tensors(features_gpu, stats_gpu['mean'], stats_gpu['cov_inv'])
+                dists = _mahalanobis_distance_gpu_tensors(
+                    features_gpu, stats_gpu["mean"], stats_gpu["cov_inv"]
+                )
                 in_dist_distances_gpu = torch.minimum(in_dist_distances_gpu, dists)
 
-            ood_distances_gpu = torch.full((batch_size,), float('inf'), dtype=torch.float64, device=GPU_DEVICE)
+            ood_distances_gpu = torch.full(
+                (batch_size,), float("inf"), dtype=torch.float64, device=GPU_DEVICE
+            )
             for stats_gpu in self.ood_clusters_gpu.values():
-                dists = _mahalanobis_distance_gpu_tensors(features_gpu, stats_gpu['mean'], stats_gpu['cov_inv'])
+                dists = _mahalanobis_distance_gpu_tensors(
+                    features_gpu, stats_gpu["mean"], stats_gpu["cov_inv"]
+                )
                 ood_distances_gpu = torch.minimum(ood_distances_gpu, dists)
 
             in_dist_distances = in_dist_distances_gpu.cpu().numpy()
@@ -1125,14 +1278,18 @@ class MCDDetector:
             torch.cuda.empty_cache()
         else:
             # CPU path
-            in_dist_distances = np.full(batch_size, float('inf'))
+            in_dist_distances = np.full(batch_size, float("inf"))
             for cluster_stats in self.in_distribution_clusters.values():
-                distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
+                distances = self._mahalanobis_distance_batch(
+                    features, cluster_stats["mean"], cluster_stats["cov_inv"]
+                )
                 in_dist_distances = np.minimum(in_dist_distances, distances)
 
-            ood_distances = np.full(batch_size, float('inf'))
+            ood_distances = np.full(batch_size, float("inf"))
             for cluster_stats in self.ood_clusters.values():
-                distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
+                distances = self._mahalanobis_distance_batch(
+                    features, cluster_stats["mean"], cluster_stats["cov_inv"]
+                )
                 ood_distances = np.minimum(ood_distances, distances)
 
         # Handle edge cases
@@ -1158,7 +1315,7 @@ class MCDDetector:
         scores = np.clip(scores, -10000, 10000)
 
         return scores
-    
+
     def evaluate(self, test_features, test_labels):
         """Evaluate the detector on test data"""
         predictions, scores = self.predict(test_features)
@@ -1174,7 +1331,9 @@ class MCDDetector:
             try:
                 # Calculate TPR, FPR from confusion matrix
                 tn, fp, fn, tp = confusion_matrix(test_labels, predictions).ravel()
-                tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0  # True Positive Rate (Sensitivity/Recall)
+                tpr = (
+                    tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                )  # True Positive Rate (Sensitivity/Recall)
                 fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0  # False Positive Rate
 
                 # Calculate AUROC and AUPRC
@@ -1183,35 +1342,36 @@ class MCDDetector:
                 precision, recall, _ = precision_recall_curve(test_labels, scores)
                 auprc = auc(recall, precision)
             except:
-                tpr = float('nan')
-                fpr = float('nan')
-                auroc = float('nan')
-                auprc = float('nan')
+                tpr = float("nan")
+                fpr = float("nan")
+                auroc = float("nan")
+                auprc = float("nan")
         else:
-            tpr = float('nan')
-            fpr = float('nan')
-            auroc = float('nan')
-            auprc = float('nan')
+            tpr = float("nan")
+            fpr = float("nan")
+            auroc = float("nan")
+            auprc = float("nan")
 
         return {
-            'accuracy': accuracy,
-            'f1': f1,
-            'tpr': tpr,
-            'fpr': fpr,
-            'auroc': auroc,
-            'auprc': auprc,
-            'predictions': predictions,
-            'scores': scores,
-            'threshold': self.threshold
+            "accuracy": accuracy,
+            "f1": f1,
+            "tpr": tpr,
+            "fpr": fpr,
+            "auroc": auroc,
+            "auprc": auprc,
+            "predictions": predictions,
+            "scores": scores,
+            "threshold": self.threshold,
         }
+
 
 def analyze_dataset_composition(dataset, dataset_name):
     """Analyze and report dataset composition"""
     total = len(dataset)
-    benign = sum(1 for s in dataset if s['toxicity'] == 0)
-    malicious = sum(1 for s in dataset if s['toxicity'] == 1)
+    benign = sum(1 for s in dataset if s["toxicity"] == 0)
+    malicious = sum(1 for s in dataset if s["toxicity"] == 1)
 
-    has_images = sum(1 for s in dataset if s.get('img') is not None)
+    has_images = sum(1 for s in dataset if s.get("img") is not None)
     text_only = total - has_images
 
     print(f"{dataset_name}: {total} samples")
@@ -1223,28 +1383,36 @@ def analyze_dataset_composition(dataset, dataset_name):
     elif malicious == 0:
         print(f"  WARNING: {dataset_name} contains ONLY benign samples!")
 
-    return {'total': total, 'benign': benign, 'malicious': malicious, 'multimodal': has_images}
+    return {
+        "total": total,
+        "benign": benign,
+        "malicious": malicious,
+        "multimodal": has_images,
+    }
+
 
 def prepare_ood_data_structure(datasets_dict, hidden_states_dict, labels_dict):
     in_dist_data = {}
     ood_data = {}
-    
+
     for dataset_name in datasets_dict.keys():
         if dataset_name not in hidden_states_dict:
             continue
-            
+
         features = hidden_states_dict[dataset_name]
         labels = labels_dict[dataset_name]
-        
+
         # Separate benign and malicious samples
         benign_features = [features[i] for i, label in enumerate(labels) if label == 0]
-        malicious_features = [features[i] for i, label in enumerate(labels) if label == 1]
-        
+        malicious_features = [
+            features[i] for i, label in enumerate(labels) if label == 1
+        ]
+
         if benign_features:
             in_dist_data[f"{dataset_name}_benign"] = benign_features
         if malicious_features:
             ood_data[f"{dataset_name}_malicious"] = malicious_features
-    
+
     return in_dist_data, ood_data
 
 
@@ -1268,13 +1436,13 @@ def check_all_hidden_states_cached(datasets_dict, model_path, experiment_name):
             dataset_name=dataset_name,
             model_path=model_path,
             dataset_size=dataset_size,
-            experiment_name=experiment_name
+            experiment_name=experiment_name,
         )
 
         if cache_entry is None:
             return False, None
 
-        layer_range = cache_entry.get('layer_range')
+        layer_range = cache_entry.get("layer_range")
         if layer_range is None or len(layer_range) != 2:
             return False, None
 
@@ -1282,14 +1450,18 @@ def check_all_hidden_states_cached(datasets_dict, model_path, experiment_name):
         if cached_layer_range is None:
             cached_layer_range = layer_range
         elif layer_range != cached_layer_range:
-            print(f"Cache layer range mismatch for {dataset_name}: {layer_range} vs {cached_layer_range}. Recomputing features.")
+            print(
+                f"Cache layer range mismatch for {dataset_name}: {layer_range} vs {cached_layer_range}. Recomputing features."
+            )
             return False, None
 
     return True, cached_layer_range
 
+
 def signal_handler(sig, frame):
-    print('\nInterrupted by user. Exiting...')
+    print("\nInterrupted by user. Exiting...")
     sys.exit(0)
+
 
 def prepare_balanced_training():
     """
@@ -1319,7 +1491,7 @@ def prepare_balanced_training():
         mmvet_samples = load_mm_vet()
         if mmvet_samples:
             # Limit to 218 samples and ensure they are benign
-            mmvet_benign = [s for s in mmvet_samples if s.get('toxicity', 0) == 0][:218]
+            mmvet_benign = [s for s in mmvet_samples if s.get("toxicity", 0) == 0][:218]
             if mmvet_benign:
                 benign_training["MM-Vet"] = mmvet_benign
                 print(f"  Loaded {len(mmvet_benign)} MM-Vet samples")
@@ -1355,14 +1527,12 @@ def prepare_balanced_training():
 
         # Load llm_transfer_attack samples (275 samples)
         llm_attack_samples = load_JailBreakV_custom(
-            attack_types=["llm_transfer_attack"],
-            max_samples=275
+            attack_types=["llm_transfer_attack"], max_samples=275
         )
 
         # Load query_related samples (275 samples)
         query_related_samples = load_JailBreakV_custom(
-            attack_types=["query_related"],
-            max_samples=275
+            attack_types=["query_related"], max_samples=275
         )
 
         # Combine both attack types
@@ -1376,7 +1546,9 @@ def prepare_balanced_training():
 
         if jbv_samples:
             malicious_training["JailbreakV-28K"] = jbv_samples
-            print(f"  Total JailbreakV-28K training samples: {len(jbv_samples)} ({len(llm_attack_samples)} llm_transfer + {len(query_related_samples)} query_related)")
+            print(
+                f"  Total JailbreakV-28K training samples: {len(jbv_samples)} ({len(llm_attack_samples)} llm_transfer + {len(query_related_samples)} query_related)"
+            )
         else:
             print("  Warning: No JailbreakV-28K samples loaded")
 
@@ -1393,6 +1565,7 @@ def prepare_balanced_training():
         print(f"Could not load DAN Prompts: {e}")
 
     return benign_training, malicious_training
+
 
 def prepare_balanced_evaluation():
     """
@@ -1411,7 +1584,7 @@ def prepare_balanced_evaluation():
     try:
         xstest_samples = load_XSTest()
         if xstest_samples:
-            xstest_safe = [s for s in xstest_samples if s.get('toxicity', 0) == 0][:250]
+            xstest_safe = [s for s in xstest_samples if s.get("toxicity", 0) == 0][:250]
             if xstest_safe:
                 test_datasets["XSTest_safe"] = xstest_safe
                 print(f"  Loaded {len(xstest_safe)} XSTest safe samples")
@@ -1420,8 +1593,10 @@ def prepare_balanced_evaluation():
 
     # 2. XSTest unsafe - 200 samples
     try:
-        if 'xstest_samples' in locals():
-            xstest_unsafe = [s for s in xstest_samples if s.get('toxicity', 0) == 1][:200]
+        if "xstest_samples" in locals():
+            xstest_unsafe = [s for s in xstest_samples if s.get("toxicity", 0) == 1][
+                :200
+            ]
             if xstest_unsafe:
                 test_datasets["XSTest_unsafe"] = xstest_unsafe
                 print(f"  Loaded {len(xstest_unsafe)} XSTest unsafe samples")
@@ -1432,7 +1607,7 @@ def prepare_balanced_evaluation():
     try:
         figtxt_samples = load_FigTxt()
         if figtxt_samples:
-            figtxt_safe = [s for s in figtxt_samples if s.get('toxicity', 0) == 0][:300]
+            figtxt_safe = [s for s in figtxt_samples if s.get("toxicity", 0) == 0][:300]
             if figtxt_safe:
                 test_datasets["FigTxt_safe"] = figtxt_safe
                 print(f"  Loaded {len(figtxt_safe)} FigTxt safe samples")
@@ -1441,8 +1616,10 @@ def prepare_balanced_evaluation():
 
     # 4. FigTxt unsafe - 350 samples
     try:
-        if 'figtxt_samples' in locals():
-            figtxt_unsafe = [s for s in figtxt_samples if s.get('toxicity', 0) == 1][:350]
+        if "figtxt_samples" in locals():
+            figtxt_unsafe = [s for s in figtxt_samples if s.get("toxicity", 0) == 1][
+                :350
+            ]
             if figtxt_unsafe:
                 test_datasets["FigTxt_unsafe"] = figtxt_unsafe
                 print(f"  Loaded {len(figtxt_unsafe)} FigTxt unsafe samples")
@@ -1477,11 +1654,14 @@ def prepare_balanced_evaluation():
         jbv_test_samples = load_JailBreakV_figstep(max_samples=150)
         if jbv_test_samples:
             test_datasets["JailbreakV-28K_test"] = jbv_test_samples
-            print(f"  Loaded {len(jbv_test_samples)} JailbreakV-28K test samples (figstep attack)")
+            print(
+                f"  Loaded {len(jbv_test_samples)} JailbreakV-28K test samples (figstep attack)"
+            )
     except Exception as e:
         print(f"Could not load JailbreakV-28K test samples: {e}")
 
     return test_datasets
+
 
 def main():
     signal.signal(signal.SIGINT, signal_handler)
@@ -1489,11 +1669,11 @@ def main():
     import sys
 
     model_type = REQUESTED_MODEL
-    if model_type == 'qwen':
+    if model_type == "qwen":
         model_path = "./model/qwen2.5-vl-7b-instruct"
-    elif model_type == 'llava':
+    elif model_type == "llava":
         model_path = "model/llava-v1.6-vicuna-7b/"
-    elif model_type == 'internvl':
+    elif model_type == "internvl":
         model_path = "model/internvl3-8b"
     else:
         print(f"Unknown model type: {model_type}. Use 'llava', 'qwen', or 'internvl'")
@@ -1509,22 +1689,28 @@ def main():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    os.environ['PYTHONHASHSEED'] = str(MAIN_SEED)
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # For deterministic CuBLAS operations
+    os.environ["PYTHONHASHSEED"] = str(MAIN_SEED)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = (
+        ":4096:8"  # For deterministic CuBLAS operations
+    )
     torch.use_deterministic_algorithms(True, warn_only=True)
 
     print(f"Random seeds set for reproducibility (seed={MAIN_SEED})")
 
     ProjectionConfig.set_model_dimensions(model_type)
 
-    print("="*80)
+    print("=" * 80)
     print("Training Set (2,000 examples, 1:1 ratio):")
     print("  - Benign (1,000): Alpaca (500) + MM-Vet (218) + OpenAssistant (282)")
-    print("  - Malicious (1,000): AdvBench (300) + JailbreakV-28K (550) + DAN variants (150)")
+    print(
+        "  - Malicious (1,000): AdvBench (300) + JailbreakV-28K (550) + DAN variants (150)"
+    )
     print("Test Set (1,800 examples, 1:1 ratio):")
     print("  - Safe (900): XSTest safe (250) + FigTxt safe (300) + VQAv2 (350)")
-    print("  - Unsafe (900): XSTest unsafe (200) + FigTxt unsafe (350) + VAE (200) + JailbreakV-28K (150)")
-    print("="*80)
+    print(
+        "  - Unsafe (900): XSTest unsafe (200) + FigTxt unsafe (350) + VAE (200) + JailbreakV-28K (150)"
+    )
+    print("=" * 80)
 
     # Load balanced training data
     in_dist_datasets, ood_datasets = prepare_balanced_training()
@@ -1547,8 +1733,8 @@ def main():
     print(f"\nTraining Data Summary:")
     print(f"  Total Benign (In-Distribution): {total_benign:,} samples")
     print(f"  Total Malicious (OOD): {total_malicious:,} samples")
-    print(f"  Ratio (Benign:Malicious): {total_benign/max(total_malicious,1):.1f}:1")
-    print("-"*80)
+    print(f"  Ratio (Benign:Malicious): {total_benign / max(total_malicious, 1):.1f}:1")
+    print("-" * 80)
 
     # Load balanced evaluation data
     test_datasets = prepare_balanced_evaluation()
@@ -1571,7 +1757,9 @@ def main():
 
     if cache_ready and cached_layer_range is not None:
         layer_start, layer_end = cached_layer_range
-        print(f"All datasets found in cache for layers {layer_start}-{layer_end}. Skipping model loading.")
+        print(
+            f"All datasets found in cache for layers {layer_start}-{layer_end}. Skipping model loading."
+        )
     else:
         layer_start, layer_end = extractor.get_default_layer_range()
 
@@ -1580,72 +1768,92 @@ def main():
 
     # Initialize profiler for feature extraction (only measure when actually extracting, not loading from cache)
     feature_profiler = PerformanceProfiler()
-    
+
     # Add baseline benchmark: measure base model forward pass on a small sample
     print("\n=== Benchmarking Baseline Model Inference ===")
     baseline_profiler = PerformanceProfiler()
-    
+
     # Get a small sample for baseline benchmark (use first test dataset sample)
     baseline_sample = None
     for dataset_name, samples in test_datasets.items():
         if samples and len(samples) > 0:
             baseline_sample = samples[0]
             break
-    
+
     if baseline_sample is None:
         # Fallback to training data
         for dataset_name, samples in in_dist_datasets.items():
             if samples and len(samples) > 0:
                 baseline_sample = samples[0]
                 break
-    
+
     if baseline_sample:
         # Load model if needed
         if extractor.model is None:
             extractor._load_model()
-        
+
         if extractor.model is not None:
             # Benchmark baseline: measure ONLY the forward pass (exclude data prep)
             print(f"  Benchmarking baseline model forward pass (fair comparison)...")
             num_baseline_runs = 10  # Run multiple times for average
-            
+
             # Prepare input ONCE outside profiling (data prep overhead not included)
-            if baseline_sample['img'] == None:
+            if baseline_sample["img"] == None:
                 prompt = extractor._construct_conv_prompt(baseline_sample)
-                input_ids = (
-                    tokenizer_image_token(prompt, extractor.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                    .unsqueeze(0)
+                input_ids = tokenizer_image_token(
+                    prompt, extractor.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+                ).unsqueeze(0)
+                max_length = getattr(
+                    extractor.model.config, "max_position_embeddings", 4096
                 )
-                max_length = getattr(extractor.model.config, 'max_position_embeddings', 4096)
                 if input_ids.shape[1] > max_length:
                     input_ids = input_ids[:, :max_length]
                 input_ids = input_ids.cuda()
                 images_tensor, images_size = None, None
             else:
                 prompt = extractor._construct_conv_prompt(baseline_sample)
-                input_ids = (
-                    tokenizer_image_token(prompt, extractor.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                    .unsqueeze(0)
+                input_ids = tokenizer_image_token(
+                    prompt, extractor.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+                ).unsqueeze(0)
+                max_length = getattr(
+                    extractor.model.config, "max_position_embeddings", 4096
                 )
-                max_length = getattr(extractor.model.config, 'max_position_embeddings', 4096)
                 if input_ids.shape[1] > max_length:
                     input_ids = input_ids[:, :max_length]
                 input_ids = input_ids.cuda()
-                images_tensor, images_size = extractor._prepare_imgs_tensor_both_cases(baseline_sample)
-            
+                images_tensor, images_size = extractor._prepare_imgs_tensor_both_cases(
+                    baseline_sample
+                )
+
             # Now profile ONLY the forward pass (fair comparison with MLP/detection)
-            with baseline_profiler.profile('baseline_forward_pass', num_samples=num_baseline_runs):
+            with baseline_profiler.profile(
+                "baseline_forward_pass", num_samples=num_baseline_runs
+            ):
                 for _ in range(num_baseline_runs):
                     with torch.no_grad():
                         if images_tensor is not None:
-                            _ = extractor.model(input_ids, images=images_tensor, image_sizes=images_size, output_hidden_states=True)
+                            _ = extractor.model(
+                                input_ids,
+                                images=images_tensor,
+                                image_sizes=images_size,
+                                output_hidden_states=True,
+                            )
                         else:
-                            _ = extractor.model(input_ids, images=None, image_sizes=None, output_hidden_states=True)
-            
-            baseline_summary = baseline_profiler.get_summary('baseline_forward_pass')
+                            _ = extractor.model(
+                                input_ids,
+                                images=None,
+                                image_sizes=None,
+                                output_hidden_states=True,
+                            )
+
+            baseline_summary = baseline_profiler.get_summary("baseline_forward_pass")
             if baseline_summary:
-                print(f"  Baseline forward pass: {baseline_summary['mean_time_seconds']*1000:.2f}ms per sample")
-                print(f"  Baseline GPU memory: {baseline_summary['peak_gpu_memory_mb']/1024:.3f}GB")
+                print(
+                    f"  Baseline forward pass: {baseline_summary['mean_time_seconds'] * 1000:.2f}ms per sample"
+                )
+                print(
+                    f"  Baseline GPU memory: {baseline_summary['peak_gpu_memory_mb'] / 1024:.3f}GB"
+                )
             cleanup_gpu_memory()
         else:
             print("  Skipping baseline benchmark (model failed to load)")
@@ -1653,7 +1861,7 @@ def main():
     else:
         print("  Skipping baseline benchmark (no samples available)")
         baseline_profiler = None
-    
+
     for dataset_name, samples in all_datasets.items():
         print(f"Extracting features for {dataset_name} ({len(samples)} samples)...")
 
@@ -1666,13 +1874,15 @@ def main():
             dataset_name=dataset_name,
             model_path=model_path,
             dataset_size=len(samples),
-            experiment_name=CACHE_EXPERIMENT_NAME
+            experiment_name=CACHE_EXPERIMENT_NAME,
         )
         is_cached = cache_entry is not None
-        
+
         # Profile feature extraction only if not cached (actual extraction)
         if not is_cached:
-            with feature_profiler.profile('feature_extraction', num_samples=len(samples)):
+            with feature_profiler.profile(
+                "feature_extraction", num_samples=len(samples)
+            ):
                 hidden_states, labels, _ = extractor.extract_hidden_states(
                     samples,
                     f"{dataset_name}",
@@ -1682,7 +1892,7 @@ def main():
                     batch_size=batch_size,
                     memory_cleanup_freq=memory_cleanup_freq,
                     experiment_name=CACHE_EXPERIMENT_NAME,
-                    token_strategy=TOKEN_STRATEGY
+                    token_strategy=TOKEN_STRATEGY,
                 )
         else:
             # Just load from cache (fast, no need to profile)
@@ -1695,22 +1905,31 @@ def main():
                 batch_size=batch_size,
                 memory_cleanup_freq=memory_cleanup_freq,
                 experiment_name=CACHE_EXPERIMENT_NAME,
-                token_strategy=TOKEN_STRATEGY
+                token_strategy=TOKEN_STRATEGY,
             )
         all_hidden_states[dataset_name] = hidden_states
         all_labels[dataset_name] = labels
 
     layers = list(range(layer_start, layer_end + 1))  # Use dynamic layer range
     if REQUESTED_LAYERS:
-        filtered_layers = [layer for layer in REQUESTED_LAYERS if layer_start <= layer <= layer_end]
+        filtered_layers = [
+            layer for layer in REQUESTED_LAYERS if layer_start <= layer <= layer_end
+        ]
         if not filtered_layers:
-            print(f"Warning: Requested layers {REQUESTED_LAYERS} are outside model range {layer_start}-{layer_end}. Using full range.")
+            print(
+                f"Warning: Requested layers {REQUESTED_LAYERS} are outside model range {layer_start}-{layer_end}. Using full range."
+            )
         else:
             layers = filtered_layers
             print(f"Restricting training/evaluation to requested layers: {layers}")
-            if CONFIG.PROJECTION_MODE == "single_layer" and CONFIG.SINGLE_LAYER_TRAINING_LAYER not in layers:
+            if (
+                CONFIG.PROJECTION_MODE == "single_layer"
+                and CONFIG.SINGLE_LAYER_TRAINING_LAYER not in layers
+            ):
                 CONFIG.SINGLE_LAYER_TRAINING_LAYER = layers[0]
-                print(f"Adjusted SINGLE_LAYER_TRAINING_LAYER to {CONFIG.SINGLE_LAYER_TRAINING_LAYER} to align with requested layers.")
+                print(
+                    f"Adjusted SINGLE_LAYER_TRAINING_LAYER to {CONFIG.SINGLE_LAYER_TRAINING_LAYER} to align with requested layers."
+                )
     layer_results = {}
 
     # Determine actual input dimension from extracted features
@@ -1723,10 +1942,18 @@ def main():
         # Handle case where sample_features is a list of arrays
         if isinstance(sample_features, list) and len(sample_features) > 0:
             # Get the dimension from the first sample
-            actual_input_dim = sample_features[0].shape[0] if hasattr(sample_features[0], 'shape') else len(sample_features[0])
-        elif hasattr(sample_features, 'shape'):
+            actual_input_dim = (
+                sample_features[0].shape[0]
+                if hasattr(sample_features[0], "shape")
+                else len(sample_features[0])
+            )
+        elif hasattr(sample_features, "shape"):
             # sample_features is already a numpy array
-            actual_input_dim = sample_features.shape[1] if len(sample_features.shape) > 1 else sample_features.shape[0]
+            actual_input_dim = (
+                sample_features.shape[1]
+                if len(sample_features.shape) > 1
+                else sample_features.shape[0]
+            )
         else:
             actual_input_dim = None
 
@@ -1734,7 +1961,9 @@ def main():
             print(f"Detected actual input dimension: {actual_input_dim}")
             # Update projection dimensions based on model type and actual dimensions
             ProjectionConfig.set_model_dimensions(model_type, actual_input_dim)
-            print(f"Updated projection config: {actual_input_dim} -> {ProjectionConfig.OUTPUT_DIM} dimensions")
+            print(
+                f"Updated projection config: {actual_input_dim} -> {ProjectionConfig.OUTPUT_DIM} dimensions"
+            )
 
     # === TRAIN LEARNED PROJECTIONS ===
     CONFIG.print_config()
@@ -1750,7 +1979,9 @@ def main():
     print("Test datasets will NOT be used for projection training")
 
     if CONFIG.PROJECTION_MODE == "single_layer":
-        print(f"\n=== Training Single Projection (Layer {CONFIG.SINGLE_LAYER_TRAINING_LAYER}) ===")
+        print(
+            f"\n=== Training Single Projection (Layer {CONFIG.SINGLE_LAYER_TRAINING_LAYER}) ==="
+        )
         print(f"Will use this projection for all layers")
 
         # Prepare training data for the single training layer
@@ -1759,7 +1990,9 @@ def main():
 
         for dataset_name in training_dataset_names:
             if dataset_name in all_hidden_states:
-                projection_features_dict[dataset_name] = all_hidden_states[dataset_name][CONFIG.SINGLE_LAYER_TRAINING_LAYER]
+                projection_features_dict[dataset_name] = all_hidden_states[
+                    dataset_name
+                ][CONFIG.SINGLE_LAYER_TRAINING_LAYER]
                 projection_labels_dict[dataset_name] = all_labels[dataset_name]
 
         # Train the single projection model
@@ -1767,19 +2000,23 @@ def main():
             projection_features_dict,
             projection_labels_dict,
             device=GPU_DEVICE,
-            random_seed=MAIN_SEED
+            random_seed=MAIN_SEED,
         )
 
         # Use the same model for all layers
         for layer_idx in layers:
             projection_models[layer_idx] = single_projection_model
 
-        print(f"Single projection training completed! Using for all {len(layers)} layers.")
+        print(
+            f"Single projection training completed! Using for all {len(layers)} layers."
+        )
         cleanup_gpu_memory()
 
     elif CONFIG.PROJECTION_MODE == "layer_specific":
         print(f"\n=== Training Layer-Specific Projections ===")
-        print(f"Training separate projection models for each layer ({layer_start}-{layer_end})")
+        print(
+            f"Training separate projection models for each layer ({layer_start}-{layer_end})"
+        )
 
         for layer_idx in layers:
             print(f"\n--- Training Projection for Layer {layer_idx} ---")
@@ -1790,16 +2027,20 @@ def main():
 
             for dataset_name in training_dataset_names:
                 if dataset_name in all_hidden_states:
-                    projection_features_dict[dataset_name] = all_hidden_states[dataset_name][layer_idx]
+                    projection_features_dict[dataset_name] = all_hidden_states[
+                        dataset_name
+                    ][layer_idx]
                     projection_labels_dict[dataset_name] = all_labels[dataset_name]
 
             # Train the projection model for this layer with layer-specific seed
-            layer_seed = MAIN_SEED + layer_idx  # Different seed for each layer but deterministic
+            layer_seed = (
+                MAIN_SEED + layer_idx
+            )  # Different seed for each layer but deterministic
             layer_projection_model, layer_dataset_name_to_id = train_learned_projection(
                 projection_features_dict,
                 projection_labels_dict,
                 device=GPU_DEVICE,
-                random_seed=layer_seed
+                random_seed=layer_seed,
             )
 
             # Store the trained model
@@ -1812,29 +2053,37 @@ def main():
             print(f"Layer {layer_idx} projection training completed!")
             cleanup_gpu_memory()
 
-        print(f"\nAll {len(projection_models)} layer-specific projections trained successfully!")
+        print(
+            f"\nAll {len(projection_models)} layer-specific projections trained successfully!"
+        )
 
     else:
-        raise ValueError(f"Unknown projection mode: {CONFIG.PROJECTION_MODE}. Use 'single_layer' or 'layer_specific'")
+        raise ValueError(
+            f"Unknown projection mode: {CONFIG.PROJECTION_MODE}. Use 'single_layer' or 'layer_specific'"
+        )
 
     # Initialize profiler for efficiency measurements
     profiler = PerformanceProfiler()
     profiling_output_path = f"results/efficiency_mcd_{model_type}.csv"
-    
+
     # Store feature extraction profiling summary (measured once, shared across layers)
     feature_extraction_summary = None
-    if feature_profiler.get_summary('feature_extraction'):
-        feature_extraction_summary = feature_profiler.get_summary('feature_extraction')
+    if feature_profiler.get_summary("feature_extraction"):
+        feature_extraction_summary = feature_profiler.get_summary("feature_extraction")
         total_feature_samples = sum(len(samples) for samples in all_datasets.values())
         print(f"\nFeature extraction profiling:")
         print(f"  Total samples processed: {total_feature_samples}")
         print(f"  Total time: {feature_extraction_summary['total_time_seconds']:.4f}s")
-        print(f"  Time per sample: {feature_extraction_summary['mean_time_seconds']:.6f}s")
-        print(f"  GPU memory: {feature_extraction_summary['total_gpu_memory_mb']:.2f}MB")
-    
+        print(
+            f"  Time per sample: {feature_extraction_summary['mean_time_seconds']:.6f}s"
+        )
+        print(
+            f"  GPU memory: {feature_extraction_summary['total_gpu_memory_mb']:.2f}MB"
+        )
+
     for layer_idx in layers:
         print(f"\n=== Evaluating Layer {layer_idx} ===")
-        
+
         # Reset profiler for this layer
         profiler.reset()
 
@@ -1844,24 +2093,28 @@ def main():
 
         for dataset_name in all_datasets.keys():
             if dataset_name in all_hidden_states:
-                layer_hidden_states[dataset_name] = all_hidden_states[dataset_name][layer_idx]
+                layer_hidden_states[dataset_name] = all_hidden_states[dataset_name][
+                    layer_idx
+                ]
                 layer_labels[dataset_name] = all_labels[dataset_name]
 
         # Apply layer-specific learned projection to transform features to 256 dimensions
         # Note: Projection was trained ONLY on training data, now applied to all data
         print(f"  Applying layer-specific projection to layer {layer_idx} features...")
-        
+
         # Profile projection application - measure ONLY forward pass (fair comparison)
-        total_projection_samples = sum(len(features) for features in layer_hidden_states.values())
-        
+        total_projection_samples = sum(
+            len(features) for features in layer_hidden_states.values()
+        )
+
         # Prepare data ONCE outside profiling (data prep overhead not included)
         projection_inputs = {}
         for dataset_name, features in layer_hidden_states.items():
             features_array = np.array(features)
             projection_inputs[dataset_name] = features_array
-        
+
         # Now profile ONLY the forward pass
-        with profiler.profile('projection', num_samples=total_projection_samples):
+        with profiler.profile("projection", num_samples=total_projection_samples):
             projected_layer_hidden_states = {}
             for dataset_name, features_array in projection_inputs.items():
                 # Convert to tensor and project in batches (same as apply_learned_projection but inline for profiling)
@@ -1869,16 +2122,18 @@ def main():
                 projected_features = []
                 model = projection_models[layer_idx]
                 model.eval()
-                
+
                 with torch.no_grad():
                     for i in range(0, len(features_array), batch_size):
-                        batch_features = features_array[i:i+batch_size]
+                        batch_features = features_array[i : i + batch_size]
                         batch_tensor = torch.FloatTensor(batch_features).to(GPU_DEVICE)
                         batch_projected = model(batch_tensor)
                         projected_features.append(batch_projected.cpu().numpy())
                         del batch_tensor, batch_projected
-                
-                projected_layer_hidden_states[dataset_name] = np.vstack(projected_features)
+
+                projected_layer_hidden_states[dataset_name] = np.vstack(
+                    projected_features
+                )
 
         # Use projected features instead of original features
         layer_hidden_states = projected_layer_hidden_states
@@ -1888,7 +2143,7 @@ def main():
         in_dist_data, ood_data = prepare_ood_data_structure(
             in_dist_datasets,
             {k: v for k, v in layer_hidden_states.items() if k in in_dist_datasets},
-            {k: v for k, v in layer_labels.items() if k in in_dist_datasets}
+            {k: v for k, v in layer_labels.items() if k in in_dist_datasets},
         )
 
         # For OOD data, we want the malicious samples from OOD datasets
@@ -1899,7 +2154,9 @@ def main():
                 labels = layer_labels[dataset_name]
 
                 # Get malicious samples (should be most/all samples in OOD datasets)
-                malicious_features = [features[i] for i, label in enumerate(labels) if label == 1]
+                malicious_features = [
+                    features[i] for i, label in enumerate(labels) if label == 1
+                ]
                 if malicious_features:
                     ood_train_data[f"{dataset_name}_malicious"] = malicious_features
 
@@ -1920,7 +2177,10 @@ def main():
         # print(f"  In-distribution clusters: {len(detector.in_distribution_clusters)}")
         # print(f"  OOD clusters: {len(detector.ood_clusters)}")
 
-        if len(detector.in_distribution_clusters) == 0 or len(detector.ood_clusters) == 0:
+        if (
+            len(detector.in_distribution_clusters) == 0
+            or len(detector.ood_clusters) == 0
+        ):
             print(f"  Skipping layer {layer_idx} - insufficient clusters")
             continue
 
@@ -1935,7 +2195,7 @@ def main():
             sample_size = min(100, len(features))
             if sample_size > 0:
                 # Use deterministic sampling: take evenly spaced indices
-                indices = np.linspace(0, len(features)-1, sample_size, dtype=int)
+                indices = np.linspace(0, len(features) - 1, sample_size, dtype=int)
                 sampled_features = [features[i] for i in indices]
                 val_features.extend(sampled_features)
                 val_labels.extend([0] * len(sampled_features))
@@ -1945,7 +2205,7 @@ def main():
             sample_size = min(100, len(features))
             if sample_size > 0:
                 # Use deterministic sampling: take evenly spaced indices
-                indices = np.linspace(0, len(features)-1, sample_size, dtype=int)
+                indices = np.linspace(0, len(features) - 1, sample_size, dtype=int)
                 sampled_features = [features[i] for i in indices]
                 val_features.extend(sampled_features)
                 val_labels.extend([1] * len(sampled_features))
@@ -1983,7 +2243,10 @@ def main():
                 test_features = layer_hidden_states[test_dataset_name]
                 test_labels_data = layer_labels[test_dataset_name]
 
-                dataset_boundaries[test_dataset_name] = (current_idx, current_idx + len(test_features))
+                dataset_boundaries[test_dataset_name] = (
+                    current_idx,
+                    current_idx + len(test_features),
+                )
                 combined_test_features.extend(test_features)
                 combined_test_labels.extend(test_labels_data)
                 current_idx += len(test_features)
@@ -1992,94 +2255,140 @@ def main():
             # Evaluate on combined test set (this simulates real-world usage)
             num_test_samples = len(combined_test_features)
             print(f"  Combined test set: {num_test_samples} samples")
-            
+
             # Profile detection inference - measure ONLY distance calculation (fair comparison)
             # Prepare features ONCE outside profiling (data prep overhead not included)
             test_features_array = np.array(combined_test_features)
-            
+
             # Now profile ONLY the distance calculation forward pass
-            with profiler.profile('detection', num_samples=num_test_samples):
+            with profiler.profile("detection", num_samples=num_test_samples):
                 # Use batch computation for MCD (same as detector.predict but inline for profiling)
                 if detector.use_gpu and len(test_features_array) > 10:
                     scores = detector._compute_ood_scores_batch(test_features_array)
                 else:
-                    scores = np.array([detector.compute_ood_score(x) for x in test_features_array])
+                    scores = np.array(
+                        [detector.compute_ood_score(x) for x in test_features_array]
+                    )
                 predictions = (scores > detector.threshold).astype(int)
-            
+
             # Calculate metrics outside profiling (evaluation overhead not included)
             accuracy = accuracy_score(combined_test_labels, predictions)
             f1 = f1_score(combined_test_labels, predictions, zero_division=0)
-            
+
             unique_classes = np.unique(combined_test_labels)
             if len(unique_classes) > 1:
                 try:
-                    tn, fp, fn, tp = confusion_matrix(combined_test_labels, predictions).ravel()
+                    tn, fp, fn, tp = confusion_matrix(
+                        combined_test_labels, predictions
+                    ).ravel()
                     tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
                     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
                     fpr_curve, tpr_curve, _ = roc_curve(combined_test_labels, scores)
                     auroc = auc(fpr_curve, tpr_curve)
-                    precision, recall, _ = precision_recall_curve(combined_test_labels, scores)
+                    precision, recall, _ = precision_recall_curve(
+                        combined_test_labels, scores
+                    )
                     auprc = auc(recall, precision)
                 except:
-                    tpr = float('nan')
-                    fpr = float('nan')
-                    auroc = float('nan')
-                    auprc = float('nan')
+                    tpr = float("nan")
+                    fpr = float("nan")
+                    auroc = float("nan")
+                    auprc = float("nan")
             else:
-                tpr = float('nan')
-                fpr = float('nan')
-                auroc = float('nan')
-                auprc = float('nan')
-            
+                tpr = float("nan")
+                fpr = float("nan")
+                auroc = float("nan")
+                auprc = float("nan")
+
             combined_eval_results = {
-                'accuracy': accuracy,
-                'f1': f1,
-                'tpr': tpr,
-                'fpr': fpr,
-                'auroc': auroc,
-                'auprc': auprc,
-                'predictions': predictions,
-                'scores': scores,
-                'threshold': detector.threshold
+                "accuracy": accuracy,
+                "f1": f1,
+                "tpr": tpr,
+                "fpr": fpr,
+                "auroc": auroc,
+                "auprc": auprc,
+                "predictions": predictions,
+                "scores": scores,
+                "threshold": detector.threshold,
             }
 
             # Compute combined test score distributions for analysis
-            combined_scores = combined_eval_results['scores']
-            combined_benign_scores = [combined_scores[i] for i, label in enumerate(combined_test_labels) if label == 0]
-            combined_malicious_scores = [combined_scores[i] for i, label in enumerate(combined_test_labels) if label == 1]
+            combined_scores = combined_eval_results["scores"]
+            combined_benign_scores = [
+                combined_scores[i]
+                for i, label in enumerate(combined_test_labels)
+                if label == 0
+            ]
+            combined_malicious_scores = [
+                combined_scores[i]
+                for i, label in enumerate(combined_test_labels)
+                if label == 1
+            ]
 
             print(f"  Combined test score distributions:")
             if combined_benign_scores:
-                print(f"    Benign: mean={np.mean(combined_benign_scores):.2f}, std={np.std(combined_benign_scores):.2f}, range=[{np.min(combined_benign_scores):.2f}, {np.max(combined_benign_scores):.2f}]")
+                print(
+                    f"    Benign: mean={np.mean(combined_benign_scores):.2f}, std={np.std(combined_benign_scores):.2f}, range=[{np.min(combined_benign_scores):.2f}, {np.max(combined_benign_scores):.2f}]"
+                )
             if combined_malicious_scores:
-                print(f"    Malicious: mean={np.mean(combined_malicious_scores):.2f}, std={np.std(combined_malicious_scores):.2f}, range=[{np.min(combined_malicious_scores):.2f}, {np.max(combined_malicious_scores):.2f}]")
+                print(
+                    f"    Malicious: mean={np.mean(combined_malicious_scores):.2f}, std={np.std(combined_malicious_scores):.2f}, range=[{np.min(combined_malicious_scores):.2f}, {np.max(combined_malicious_scores):.2f}]"
+                )
 
             # Handle NaN values for display
             f1_str = f"{combined_eval_results['f1']:.4f}"
-            tpr_str = "N/A" if np.isnan(combined_eval_results['tpr']) else f"{combined_eval_results['tpr']:.4f}"
-            fpr_str = "N/A" if np.isnan(combined_eval_results['fpr']) else f"{combined_eval_results['fpr']:.4f}"
-            auroc_str = "N/A" if np.isnan(combined_eval_results['auroc']) else f"{combined_eval_results['auroc']:.4f}"
-            auprc_str = "N/A" if np.isnan(combined_eval_results['auprc']) else f"{combined_eval_results['auprc']:.4f}"
+            tpr_str = (
+                "N/A"
+                if np.isnan(combined_eval_results["tpr"])
+                else f"{combined_eval_results['tpr']:.4f}"
+            )
+            fpr_str = (
+                "N/A"
+                if np.isnan(combined_eval_results["fpr"])
+                else f"{combined_eval_results['fpr']:.4f}"
+            )
+            auroc_str = (
+                "N/A"
+                if np.isnan(combined_eval_results["auroc"])
+                else f"{combined_eval_results['auroc']:.4f}"
+            )
+            auprc_str = (
+                "N/A"
+                if np.isnan(combined_eval_results["auprc"])
+                else f"{combined_eval_results['auprc']:.4f}"
+            )
 
-            print(f"  COMBINED RESULTS   : Acc={combined_eval_results['accuracy']:.4f}, F1={f1_str}, TPR={tpr_str}, FPR={fpr_str}, "
-                  f"AUROC={auroc_str}, AUPRC={auprc_str}, Thresh={combined_eval_results['threshold']:.4f}")
+            print(
+                f"  COMBINED RESULTS   : Acc={combined_eval_results['accuracy']:.4f}, F1={f1_str}, TPR={tpr_str}, FPR={fpr_str}, "
+                f"AUROC={auroc_str}, AUPRC={auprc_str}, Thresh={combined_eval_results['threshold']:.4f}"
+            )
 
             # Store combined results
-            layer_performance = {'COMBINED': combined_eval_results}
+            layer_performance = {"COMBINED": combined_eval_results}
 
             # === INDIVIDUAL DATASET ANALYSIS (for debugging) ===
             print("  Individual dataset analysis:")
             for test_dataset_name, (start_idx, end_idx) in dataset_boundaries.items():
                 dataset_scores = combined_scores[start_idx:end_idx]
                 dataset_labels = combined_test_labels[start_idx:end_idx]
-                dataset_predictions = combined_eval_results['predictions'][start_idx:end_idx]
+                dataset_predictions = combined_eval_results["predictions"][
+                    start_idx:end_idx
+                ]
 
                 # Calculate individual dataset metrics using the same threshold
                 dataset_accuracy = accuracy_score(dataset_labels, dataset_predictions)
 
                 # Separate scores by label for analysis
-                dataset_benign_scores = [dataset_scores[i] for i, label in enumerate(dataset_labels) if label == 0]
-                dataset_malicious_scores = [dataset_scores[i] for i, label in enumerate(dataset_labels) if label == 1]
+                dataset_benign_scores = [
+                    dataset_scores[i]
+                    for i, label in enumerate(dataset_labels)
+                    if label == 0
+                ]
+                dataset_malicious_scores = [
+                    dataset_scores[i]
+                    for i, label in enumerate(dataset_labels)
+                    if label == 1
+                ]
 
                 if dataset_benign_scores:
                     benign_stats = f"mean={np.mean(dataset_benign_scores):.2f}, range=[{np.min(dataset_benign_scores):.2f}, {np.max(dataset_benign_scores):.2f}]"
@@ -2102,41 +2411,61 @@ def main():
                 unique_classes = np.unique(dataset_labels)
                 if len(unique_classes) > 1:
                     try:
-                        tn, fp, fn, tp = confusion_matrix(dataset_labels, dataset_predictions).ravel()
-                        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0  # True Positive Rate
-                        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0  # False Positive Rate
+                        tn, fp, fn, tp = confusion_matrix(
+                            dataset_labels, dataset_predictions
+                        ).ravel()
+                        tpr = (
+                            tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                        )  # True Positive Rate
+                        fpr = (
+                            fp / (fp + tn) if (fp + tn) > 0 else 0.0
+                        )  # False Positive Rate
                     except:
-                        tpr = float('nan')
-                        fpr = float('nan')
+                        tpr = float("nan")
+                        fpr = float("nan")
                 else:
-                    tpr = float('nan')
-                    fpr = float('nan')
+                    tpr = float("nan")
+                    fpr = float("nan")
 
                 # Store individual results for detailed analysis
                 layer_performance[test_dataset_name] = {
-                    'accuracy': dataset_accuracy,
-                    'f1': f1,
-                    'tpr': tpr,
-                    'fpr': fpr,
-                    'auroc': float('nan'),  # Not meaningful for individual datasets with combined threshold
-                    'auprc': float('nan'),  # Not meaningful for individual datasets with combined threshold
-                    'predictions': dataset_predictions,
-                    'scores': dataset_scores,
-                    'threshold': combined_eval_results['threshold']
+                    "accuracy": dataset_accuracy,
+                    "f1": f1,
+                    "tpr": tpr,
+                    "fpr": fpr,
+                    "auroc": float(
+                        "nan"
+                    ),  # Not meaningful for individual datasets with combined threshold
+                    "auprc": float(
+                        "nan"
+                    ),  # Not meaningful for individual datasets with combined threshold
+                    "predictions": dataset_predictions,
+                    "scores": dataset_scores,
+                    "threshold": combined_eval_results["threshold"],
                 }
         else:
             print("  No test data available for evaluation")
             layer_performance = {}
 
         layer_results[layer_idx] = layer_performance
-        
+
         # Save profiling results for this layer (even if evaluation failed)
         # Use COMBINED dataset for profiling (represents real-world usage)
         try:
-            baseline_summary = baseline_profiler.get_summary('baseline_forward_pass') if baseline_profiler else None
-            save_profiling_results(profiler, profiling_output_path, layer_idx, 'COMBINED', 'MCD', 
-                                  feature_extraction_summary=feature_extraction_summary,
-                                  baseline_summary=baseline_summary)
+            baseline_summary = (
+                baseline_profiler.get_summary("baseline_forward_pass")
+                if baseline_profiler
+                else None
+            )
+            save_profiling_results(
+                profiler,
+                profiling_output_path,
+                layer_idx,
+                "COMBINED",
+                "MCD",
+                feature_extraction_summary=feature_extraction_summary,
+                baseline_summary=baseline_summary,
+            )
             print(f"  Efficiency metrics saved to {profiling_output_path}")
         except Exception as e:
             print(f"  Warning: Failed to save profiling results: {e}")
@@ -2144,15 +2473,29 @@ def main():
     # Calculate layer ranking based on COMBINED results (real-world performance)
     layer_combined_scores = []
     for layer_idx in layers:
-        if layer_idx in layer_results and layer_results[layer_idx] and 'COMBINED' in layer_results[layer_idx]:
-            combined_result = layer_results[layer_idx]['COMBINED']
-            accuracy = combined_result['accuracy']
-            auroc = combined_result['auroc'] if not np.isnan(combined_result['auroc']) else 0.0
-            auprc = combined_result['auprc'] if not np.isnan(combined_result['auprc']) else 0.0
+        if (
+            layer_idx in layer_results
+            and layer_results[layer_idx]
+            and "COMBINED" in layer_results[layer_idx]
+        ):
+            combined_result = layer_results[layer_idx]["COMBINED"]
+            accuracy = combined_result["accuracy"]
+            auroc = (
+                combined_result["auroc"]
+                if not np.isnan(combined_result["auroc"])
+                else 0.0
+            )
+            auprc = (
+                combined_result["auprc"]
+                if not np.isnan(combined_result["auprc"])
+                else 0.0
+            )
 
             # Combined score prioritizing accuracy and AUROC for real-world performance
             combined_score = 0.5 * accuracy + 0.3 * auroc + 0.2 * auprc
-            layer_combined_scores.append((layer_idx, accuracy, auroc, auprc, combined_score))
+            layer_combined_scores.append(
+                (layer_idx, accuracy, auroc, auprc, combined_score)
+            )
         else:
             layer_combined_scores.append((layer_idx, 0.0, 0.0, 0.0, 0.0))
 
@@ -2164,10 +2507,15 @@ def main():
     for layer_idx in layers:
         if layer_idx in layer_results and layer_results[layer_idx]:
             # Exclude COMBINED from individual averages
-            individual_results = {k: v for k, v in layer_results[layer_idx].items() if k != 'COMBINED'}
+            individual_results = {
+                k: v for k, v in layer_results[layer_idx].items() if k != "COMBINED"
+            }
             if individual_results:
-                accuracies = [result['accuracy'] for result in individual_results.values()
-                             if not np.isnan(result['accuracy'])]
+                accuracies = [
+                    result["accuracy"]
+                    for result in individual_results.values()
+                    if not np.isnan(result["accuracy"])
+                ]
                 avg_accuracy = np.mean(accuracies) if accuracies else 0.0
                 layer_individual_avg_scores.append((layer_idx, avg_accuracy))
             else:
@@ -2181,63 +2529,113 @@ def main():
     output_path = f"results/balanced_mcd_{model_type}_results.csv"
     with open(output_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["Layer", "Dataset", "Method", "Accuracy", "F1", "TPR", "FPR", "AUROC", "AUPRC", "Threshold", "Combined_Rank", "Individual_Rank"])
+        writer.writerow(
+            [
+                "Layer",
+                "Dataset",
+                "Method",
+                "Accuracy",
+                "F1",
+                "TPR",
+                "FPR",
+                "AUROC",
+                "AUPRC",
+                "Threshold",
+                "Combined_Rank",
+                "Individual_Rank",
+            ]
+        )
 
         # Create ranking based on combined performance
-        layer_combined_ranking = {layer_idx: rank for rank, (layer_idx, _, _, _, _) in enumerate(layer_combined_scores, 1)}
+        layer_combined_ranking = {
+            layer_idx: rank
+            for rank, (layer_idx, _, _, _, _) in enumerate(layer_combined_scores, 1)
+        }
 
         # Create ranking based on individual dataset average
-        layer_individual_ranking = {layer_idx: rank for rank, (layer_idx, _) in enumerate(layer_individual_avg_scores, 1)}
+        layer_individual_ranking = {
+            layer_idx: rank
+            for rank, (layer_idx, _) in enumerate(layer_individual_avg_scores, 1)
+        }
 
         for layer_idx in layers:
             if layer_idx in layer_results and layer_results[layer_idx]:
                 for dataset_name, result in layer_results[layer_idx].items():
                     # Handle NaN values for CSV
                     f1_val = f"{result['f1']:.4f}"
-                    tpr_val = "N/A" if np.isnan(result['tpr']) else f"{result['tpr']:.4f}"
-                    fpr_val = "N/A" if np.isnan(result['fpr']) else f"{result['fpr']:.4f}"
-                    auroc_val = "N/A" if np.isnan(result['auroc']) else f"{result['auroc']:.4f}"
-                    auprc_val = "N/A" if np.isnan(result['auprc']) else f"{result['auprc']:.4f}"
+                    tpr_val = (
+                        "N/A" if np.isnan(result["tpr"]) else f"{result['tpr']:.4f}"
+                    )
+                    fpr_val = (
+                        "N/A" if np.isnan(result["fpr"]) else f"{result['fpr']:.4f}"
+                    )
+                    auroc_val = (
+                        "N/A" if np.isnan(result["auroc"]) else f"{result['auroc']:.4f}"
+                    )
+                    auprc_val = (
+                        "N/A" if np.isnan(result["auprc"]) else f"{result['auprc']:.4f}"
+                    )
                     threshold_val = f"{result['threshold']:.4f}"
                     combined_rank = layer_combined_ranking.get(layer_idx, "N/A")
                     individual_rank = layer_individual_ranking.get(layer_idx, "N/A")
 
-                    writer.writerow([
-                        layer_idx,
-                        dataset_name,
-                        "MCD",
-                        f"{result['accuracy']:.4f}",
-                        f1_val,
-                        tpr_val,
-                        fpr_val,
-                        auroc_val,
-                        auprc_val,
-                        threshold_val,
-                        combined_rank,
-                        individual_rank
-                    ])
+                    writer.writerow(
+                        [
+                            layer_idx,
+                            dataset_name,
+                            "MCD",
+                            f"{result['accuracy']:.4f}",
+                            f1_val,
+                            tpr_val,
+                            fpr_val,
+                            auroc_val,
+                            auprc_val,
+                            threshold_val,
+                            combined_rank,
+                            individual_rank,
+                        ]
+                    )
 
     print(f"\nResults saved to {output_path}")
 
     # COMBINED PERFORMANCE RANKING (Real-world scenario)
     print(f"\n{'COMBINED PERFORMANCE RANKING (Real-world scenario)':<120}")
-    print(f"{'Layer':<6} {'Accuracy':<10} {'F1':<8} {'TPR':<8} {'FPR':<8} {'AUROC':<10} {'AUPRC':<10} {'Combined':<10}")
+    print(
+        f"{'Layer':<6} {'Accuracy':<10} {'F1':<8} {'TPR':<8} {'FPR':<8} {'AUROC':<10} {'AUPRC':<10} {'Combined':<10}"
+    )
     print("-" * 120)
 
     for layer_idx, accuracy, auroc, auprc, combined_score in layer_combined_scores:
-        if layer_idx in layer_results and layer_results[layer_idx] and 'COMBINED' in layer_results[layer_idx]:
-            combined_result = layer_results[layer_idx]['COMBINED']
+        if (
+            layer_idx in layer_results
+            and layer_results[layer_idx]
+            and "COMBINED" in layer_results[layer_idx]
+        ):
+            combined_result = layer_results[layer_idx]["COMBINED"]
             acc_str = f"{accuracy:.3f}"
             f1_str = f"{combined_result['f1']:.3f}"
-            tpr_str = "N/A" if np.isnan(combined_result['tpr']) else f"{combined_result['tpr']:.3f}"
-            fpr_str = "N/A" if np.isnan(combined_result['fpr']) else f"{combined_result['fpr']:.3f}"
+            tpr_str = (
+                "N/A"
+                if np.isnan(combined_result["tpr"])
+                else f"{combined_result['tpr']:.3f}"
+            )
+            fpr_str = (
+                "N/A"
+                if np.isnan(combined_result["fpr"])
+                else f"{combined_result['fpr']:.3f}"
+            )
             auroc_str = "N/A" if auroc == 0.0 else f"{auroc:.3f}"
             auprc_str = "N/A" if auprc == 0.0 else f"{auprc:.3f}"
             combined_str = f"{combined_score:.3f}"
 
-            print(f"{layer_idx:<6} {acc_str:<10} {f1_str:<8} {tpr_str:<8} {fpr_str:<8} {auroc_str:<10} {auprc_str:<10} {combined_str:<10}")
+            print(
+                f"{layer_idx:<6} {acc_str:<10} {f1_str:<8} {tpr_str:<8} {fpr_str:<8} {auroc_str:<10} {auprc_str:<10} {combined_str:<10}"
+            )
         else:
-            print(f"{layer_idx:<6} {'N/A':<10} {'N/A':<8} {'N/A':<8} {'N/A':<8} {'N/A':<10} {'N/A':<10} {'0.000':<10}")
+            print(
+                f"{layer_idx:<6} {'N/A':<10} {'N/A':<8} {'N/A':<8} {'N/A':<8} {'N/A':<10} {'N/A':<10} {'0.000':<10}"
+            )
+
 
 if __name__ == "__main__":
     main()

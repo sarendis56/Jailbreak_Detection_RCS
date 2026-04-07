@@ -10,7 +10,7 @@ safetensors>=0.4.3
 huggingface-hub>=0.30.0
 
 # Optional performance (enable if your CUDA toolchain supports it)
-flash-attn
+# flash-attn
 
 # Data processing and ML
 numpy>=1.17

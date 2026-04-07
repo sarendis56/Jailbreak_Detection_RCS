@@ -17,12 +17,8 @@ Manual datasets (need to be obtained separately):
 
 import os
 import json
-import random
 from datasets import load_dataset
 from tqdm import tqdm
-import requests
-import zipfile
-import shutil
 import pandas as pd
 
 def create_directory_structure():
@@ -286,7 +282,7 @@ def download_xstest():
     json_output_path = "data/XSTest/xstest_samples.json"
 
     if os.path.exists(parquet_output_path) or os.path.exists(csv_output_path):
-        print(f"✅ XSTest dataset already exists, skipping download")
+        print("✅ XSTest dataset already exists, skipping download")
         return
 
     # Load the dataset from HuggingFace
@@ -337,7 +333,7 @@ def download_xstest():
         json.dump(json_samples, f, indent=2, ensure_ascii=False)
     print(f"Successfully saved {len(json_samples)} XSTest samples to {json_output_path} (JSON format)")
 
-    print(f"XSTest dataset ready - load_XSTest() will use the parquet/CSV format automatically")
+    print("XSTest dataset ready - load_XSTest() will use the parquet/CSV format automatically")
 
 def download_mm_safety_bench():
     """Download MM-SafetyBench dataset"""

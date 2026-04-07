@@ -33,45 +33,48 @@ from llava.mm_utils import (
 
 
 refusal_lst = [
-        "Sorry", "sorry",
-        "unfortunately", "unfortunate", "sadly",
-        "explicit", "deadly", "crim", "criminal", "illegal", "dangerous", "harmful", "warning", "alarm", "caution",
-        "shame", "conspiracy",
-        "Subject", "contrary", "shouldn"
-    ]
+    "Sorry",
+    "sorry",
+    "unfortunately",
+    "unfortunate",
+    "sadly",
+    "explicit",
+    "deadly",
+    "crim",
+    "criminal",
+    "illegal",
+    "dangerous",
+    "harmful",
+    "warning",
+    "alarm",
+    "caution",
+    "shame",
+    "conspiracy",
+    "Subject",
+    "contrary",
+    "shouldn",
+]
 vocab_size = 32000
 
+
 # few-shot safe and unsafe datasets to locate the most safety awareness layers
-def locate_most_safety_aware_layers(model_path):    
+def locate_most_safety_aware_layers(model_path):
     model_name = get_model_name_from_path(model_path)
 
     # Try float32 first to avoid numerical instability
     try:
-        kwargs = {
-            "device_map": "auto",
-            "torch_dtype": torch.float32
-        }
+        kwargs = {"device_map": "auto", "torch_dtype": torch.float32}
         tokenizer, model, image_processor, context_len = load_pretrained_model(
-            model_path=model_path,
-            model_base=None,
-            model_name=model_name,
-            **kwargs
+            model_path=model_path, model_base=None, model_name=model_name, **kwargs
         )
         print("Loaded model with float32 precision")
     except Exception as e:
         print(f"Float32 failed ({e}), falling back to float16")
-        kwargs = {
-            "device_map": "auto",
-            "torch_dtype": torch.float16
-        }
+        kwargs = {"device_map": "auto", "torch_dtype": torch.float16}
         tokenizer, model, image_processor, context_len = load_pretrained_model(
-            model_path=model_path,
-            model_base=None,
-            model_name=model_name,
-            **kwargs
+            model_path=model_path, model_base=None, model_name=model_name, **kwargs
         )
 
-            
     def find_conv_mode(model_name):
         # select conversation mode based on the model name
         if "llama-2" in model_name.lower():
@@ -85,11 +88,13 @@ def locate_most_safety_aware_layers(model_path):
         elif "mpt" in model_name.lower():
             conv_mode = "mpt"
         else:
-            conv_mode = "llava_v0"  
-        return conv_mode    
-        
-    def adjust_query_for_images(qs, num_images=1):   
-        image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+            conv_mode = "llava_v0"
+        return conv_mode
+
+    def adjust_query_for_images(qs, num_images=1):
+        image_token_se = (
+            DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+        )
         # Build the repeated image token prefix according to number of images
         if model.config.mm_use_im_start_end:
             token_str = image_token_se
@@ -109,14 +114,14 @@ def locate_most_safety_aware_layers(model_path):
 
         return qs
 
-    def construct_conv_prompt(sample, num_images=0):        
-        conv = conv_templates[find_conv_mode(model_name)].copy()  
-        if (sample['img'] != None):     
-            qs = adjust_query_for_images(sample['txt'], num_images=num_images)
+    def construct_conv_prompt(sample, num_images=0):
+        conv = conv_templates[find_conv_mode(model_name)].copy()
+        if sample["img"] != None:
+            qs = adjust_query_for_images(sample["txt"], num_images=num_images)
         else:
-            qs = sample['txt']
-        conv.append_message(conv.roles[0], qs)  
-        conv.append_message(conv.roles[1], None)       
+            qs = sample["txt"]
+        conv.append_message(conv.roles[0], qs)
+        conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
         return prompt
 
@@ -134,41 +139,43 @@ def locate_most_safety_aware_layers(model_path):
             image = load_image(image_file)
             out.append(image)
         return out
-    
-    def load_image_from_bytes(image_data):    
+
+    def load_image_from_bytes(image_data):
         try:
             image = Image.open(BytesIO(image_data)).convert("RGB")
             return image
         except Exception as e:
             print(f"Error loading image: {e}")
             return None
-    
-    def load_images_from_bytes(image_data_list):
-       return [load_image_from_bytes(data) for data in image_data_list]
 
-    def prepare_imgs_tensor_both_cases(sample):       
+    def load_images_from_bytes(image_data_list):
+        return [load_image_from_bytes(data) for data in image_data_list]
+
+    def prepare_imgs_tensor_both_cases(sample):
         try:
             # Case 1: Comma-separated file paths
-            if isinstance(sample['img'], str):
-                image_files_path = sample['img'].split(",")
+            if isinstance(sample["img"], str):
+                image_files_path = sample["img"].split(",")
                 img_prompt = load_images(image_files_path)
                 num_images = len(img_prompt)
             # Case 2: Single binary image
-            elif isinstance(sample['img'], bytes):
-                img_prompt = [load_image_from_bytes(sample['img'])]
+            elif isinstance(sample["img"], bytes):
+                img_prompt = [load_image_from_bytes(sample["img"])]
                 num_images = 1
             # Case 3: List of binary images
-            elif isinstance(sample['img'], list):
+            elif isinstance(sample["img"], list):
                 # Check if all elements in the list are bytes
-                if all(isinstance(item, bytes) for item in sample['img']):
-                    img_prompt = load_images_from_bytes(sample['img'])
+                if all(isinstance(item, bytes) for item in sample["img"]):
+                    img_prompt = load_images_from_bytes(sample["img"])
                     num_images = len(img_prompt)
                 else:
                     raise ValueError("List contains non-bytes data.")
 
             else:
-                raise ValueError("Unsupported data type in sample['img']. "
-                                "Expected str, bytes, or list of bytes.")
+                raise ValueError(
+                    "Unsupported data type in sample['img']. "
+                    "Expected str, bytes, or list of bytes."
+                )
             # Compute sizes
             images_size = [img.size for img in img_prompt if img is not None]
             # Process images into tensor
@@ -179,7 +186,7 @@ def locate_most_safety_aware_layers(model_path):
         except Exception as e:
             print(f"Error preparing image tensors: {e}")
             return None, None, 0
-        
+
     few_shot_safe = []
     few_shot_unsafe = []
     json_file_path = "data/few_shot/few_shot.json"
@@ -188,7 +195,7 @@ def locate_most_safety_aware_layers(model_path):
         print(f"Error: {json_file_path} not found. Please extract few_shot.zip first.")
         return None
 
-    with open(json_file_path, 'r', encoding='utf-8') as f:
+    with open(json_file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     for sample in data:
@@ -199,7 +206,9 @@ def locate_most_safety_aware_layers(model_path):
                 # Ensure images are referenced under data/few_shot/
                 if sample["img"].startswith("few_shot/"):
                     sample["img"] = sample["img"].replace("few_shot/", "data/few_shot/")
-                elif not sample["img"].startswith(("http://", "https://", "/", "data/few_shot/")):
+                elif not sample["img"].startswith(
+                    ("http://", "https://", "/", "data/few_shot/")
+                ):
                     sample["img"] = f"data/few_shot/{sample['img']}"
 
         if sample.get("toxicity", 0) == 1:
@@ -207,7 +216,9 @@ def locate_most_safety_aware_layers(model_path):
         else:
             few_shot_safe.append(sample)
 
-    print(f"Loaded few-shot dataset: {len(few_shot_safe)} safe, {len(few_shot_unsafe)} unsafe samples")
+    print(
+        f"Loaded few-shot dataset: {len(few_shot_safe)} safe, {len(few_shot_unsafe)} unsafe samples"
+    )
 
     if len(few_shot_safe) == 0 or len(few_shot_unsafe) == 0:
         print("Error: Could not create few-shot datasets")
@@ -246,52 +257,64 @@ def locate_most_safety_aware_layers(model_path):
         print("Error: No valid refusal tokens found!")
         return None
 
-    lm_head = model.lm_head    
+    lm_head = model.lm_head
     if hasattr(model, "model") and hasattr(model.model, "norm"):
         norm = model.model.norm
     elif hasattr(model, "transformer") and hasattr(model.transformer, "ln_f"):
         norm = model.transformer.ln_f
     else:
-        raise ValueError(f"Incorrect Model") 
-    
+        raise ValueError(f"Incorrect Model")
+
     F_safe = []
     F_unsafe = []
 
     print("Processing safe samples...")
     for sample in few_shot_safe:
-        F = [] 
-        if sample['img'] == None:
+        F = []
+        if sample["img"] == None:
             prompt = construct_conv_prompt(sample)
             input_ids = (
-                    tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                    .unsqueeze(0)
-                    .to(model.device)
-                )   
-            with torch.no_grad():   
-                outputs = model(input_ids, images=None, image_sizes=None, output_hidden_states=True)        
+                tokenizer_image_token(
+                    prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+                )
+                .unsqueeze(0)
+                .to(model.device)
+            )
+            with torch.no_grad():
+                outputs = model(
+                    input_ids, images=None, image_sizes=None, output_hidden_states=True
+                )
         else:
             # Prepare images and align image tokens
-            images_tensor, images_size, num_images = prepare_imgs_tensor_both_cases(sample)
+            images_tensor, images_size, num_images = prepare_imgs_tensor_both_cases(
+                sample
+            )
             if images_tensor is None or images_size is None or num_images == 0:
                 print("Skipping sample due to image preparation failure.")
                 continue
             prompt = construct_conv_prompt(sample, num_images=num_images)
             input_ids = (
-                    tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                    .unsqueeze(0)
-                    .to(model.device)
-                )      
-            with torch.no_grad(): 
-                outputs = model(input_ids, images=images_tensor, image_sizes=images_size, output_hidden_states=True)  
-              
+                tokenizer_image_token(
+                    prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+                )
+                .unsqueeze(0)
+                .to(model.device)
+            )
+            with torch.no_grad():
+                outputs = model(
+                    input_ids,
+                    images=images_tensor,
+                    image_sizes=images_size,
+                    output_hidden_states=True,
+                )
 
-        for i, r in enumerate(outputs.hidden_states[1:]):                   
-            layer_output = norm(r)                    
-            logits = lm_head(layer_output)                 
+        for i, r in enumerate(outputs.hidden_states[1:]):
+            layer_output = norm(r)
+            logits = lm_head(layer_output)
             next_token_logits = logits[:, -1, :]
-            reference_logits = token_one_hot.to(next_token_logits.device)                 
+            reference_logits = token_one_hot.to(next_token_logits.device)
             cos_sim = N.cosine_similarity(next_token_logits, reference_logits)
-            F.append(cos_sim.item())                  
+            F.append(cos_sim.item())
         F_safe.append(F)
 
     # Average over the few-shot safe dataset
@@ -306,36 +329,49 @@ def locate_most_safety_aware_layers(model_path):
     print("Processing unsafe samples...")
     for sample in few_shot_unsafe:
         F = []
-        if sample['img'] == None:
+        if sample["img"] == None:
             prompt = construct_conv_prompt(sample)
             input_ids = (
-                    tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                    .unsqueeze(0)
-                    .to(model.device)
-                )   
-            with torch.no_grad():   
-                outputs = model(input_ids, images=None, image_sizes=None, output_hidden_states=True)       
+                tokenizer_image_token(
+                    prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+                )
+                .unsqueeze(0)
+                .to(model.device)
+            )
+            with torch.no_grad():
+                outputs = model(
+                    input_ids, images=None, image_sizes=None, output_hidden_states=True
+                )
         else:
-            images_tensor, images_size, num_images = prepare_imgs_tensor_both_cases(sample)
+            images_tensor, images_size, num_images = prepare_imgs_tensor_both_cases(
+                sample
+            )
             if images_tensor is None or images_size is None or num_images == 0:
                 print("Skipping sample due to image preparation failure.")
                 continue
             prompt = construct_conv_prompt(sample, num_images=num_images)
             input_ids = (
-                    tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                    .unsqueeze(0)
-                    .to(model.device)
-                )      
-            with torch.no_grad(): 
-                outputs = model(input_ids, images=images_tensor, image_sizes=images_size, output_hidden_states=True)      
+                tokenizer_image_token(
+                    prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+                )
+                .unsqueeze(0)
+                .to(model.device)
+            )
+            with torch.no_grad():
+                outputs = model(
+                    input_ids,
+                    images=images_tensor,
+                    image_sizes=images_size,
+                    output_hidden_states=True,
+                )
 
-        for i, r in enumerate(outputs.hidden_states[1:]):                
-            layer_output = norm(r)                   
-            logits = lm_head(layer_output)              
-            next_token_logits = logits[:, -1, :]          
-            reference_logits = token_one_hot.to(next_token_logits.device)          
+        for i, r in enumerate(outputs.hidden_states[1:]):
+            layer_output = norm(r)
+            logits = lm_head(layer_output)
+            next_token_logits = logits[:, -1, :]
+            reference_logits = token_one_hot.to(next_token_logits.device)
             cos_sim = N.cosine_similarity(next_token_logits, reference_logits)
-            F.append(cos_sim.item())       
+            F.append(cos_sim.item())
         F_unsafe.append(F)
 
     # Average over the few-shot unsafe dataset
@@ -345,7 +381,9 @@ def locate_most_safety_aware_layers(model_path):
 
     F_unsafe_arr = np.mean(F_unsafe, axis=0)
     F_unsafe = F_unsafe_arr.tolist()
-    print(f"Unsafe samples processed: {len(F_unsafe)} layers, sample values: {F_unsafe[:5]}")
+    print(
+        f"Unsafe samples processed: {len(F_unsafe)} layers, sample values: {F_unsafe[:5]}"
+    )
 
     # Refusal discrepancy vector
     FDV_arr = F_unsafe_arr - F_safe_arr
@@ -353,7 +391,9 @@ def locate_most_safety_aware_layers(model_path):
 
     # Safety awareness exists broadly
     positive_layers = [str(i) for i, item in enumerate(FDV) if item > 0]
-    print("Safety awareness broadly exists at layer: " + ", ".join(positive_layers) + ".")
+    print(
+        "Safety awareness broadly exists at layer: " + ", ".join(positive_layers) + "."
+    )
 
     # Locate the most safety-aware layers by using the last layer as baseline
     most_aware_layers = [str(i) for i, item in enumerate(FDV) if item > FDV[-1]]
@@ -365,9 +405,9 @@ def locate_most_safety_aware_layers(model_path):
 if __name__ == "__main__":
     model_path = "model/llava-v1.6-vicuna-7b/"
 
-    print("="*80)
+    print("=" * 80)
     print("LLAVA SAFETY LAYER DETECTION")
-    print("="*80)
+    print("=" * 80)
 
     # Check if model exists
     if not os.path.exists(model_path):
@@ -387,20 +427,20 @@ if __name__ == "__main__":
             "FDV": FDV,
             "most_aware_layers": most_aware_layers,
             "model_path": model_path,
-            "method": "predefined_refusal_tokens"
+            "method": "predefined_refusal_tokens",
         }
 
         output_file = "results/llava_safety_layers.json"
         os.makedirs("results", exist_ok=True)
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {output_file}")
 
         # Also save a CSV with per-layer FDV and whether it's among the most-aware layers
         output_csv = "results/llava_safety_layers.csv"
-        with open(output_csv, 'w', newline='') as f:
+        with open(output_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["layer", "fdv", "is_most_aware"]) 
+            writer.writerow(["layer", "fdv", "is_most_aware"])
             most_aware_set = set(most_aware_layers)
             for layer_idx, fdv_value in enumerate(FDV):
                 is_most = str(layer_idx) in most_aware_set
@@ -408,4 +448,3 @@ if __name__ == "__main__":
         print(f"CSV saved to {output_csv}")
     else:
         print("Failed to compute safety layers")
-   

@@ -6,10 +6,7 @@ Configure which models to download by modifying the MODELS_TO_DOWNLOAD dictionar
 """
 
 import os
-import shutil
-from huggingface_hub import snapshot_download, login
-from transformers import AutoTokenizer, AutoModel
-import torch
+from huggingface_hub import snapshot_download
 
 # Set to True to download the model, False to skip
 MODELS_TO_DOWNLOAD = {
@@ -18,7 +15,7 @@ MODELS_TO_DOWNLOAD = {
     'clip_base': False,              # CLIP ViT Base (~600MB) - For JailDAM baseline
     'clip_large': False,             # CLIP ViT Large (~1.7GB) - LLaVA vision tower
     'qwen25_vl_3b': False,          # Qwen2.5-VL-3B-Instruct (~6GB) - Qwen model
-    'qwen25_vl_7b': True,          # Qwen2.5-VL-7B-Instruct (~13GB) - Larger Qwen model
+    'qwen25_vl_7b': False,          # Qwen2.5-VL-7B-Instruct (~13GB) - Larger Qwen model
     'internvl3_8b': False,          # InternVL3-8B (~15GB) - OpenGVLab model
 }
 
@@ -54,7 +51,7 @@ def print_download_plan():
         print(f"\nEstimated total download size: ~{total_size}GB")
 
     if models_to_skip:
-        print(f"\nModels to skip:")
+        print("\nModels to skip:")
         for model_key, size in models_to_skip:
             print(f"  [SKIP] {model_key}: ~{size}GB")
 
