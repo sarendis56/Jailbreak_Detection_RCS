@@ -456,6 +456,8 @@ def print_manual_instructions():
     print("\n" + "="*80)
     print("MANUAL DATASET DOWNLOAD INSTRUCTIONS")
     print("="*80)
+
+    print("DOWNLOAD ALL BELOW WITH ONE LINK: https://drive.google.com/file/d/1V09sherPVm6M0E_J_xz3uJ6IBrZ66cRV/view?usp=sharing")
     
     print("\nThe following datasets need to be downloaded manually:")
     print("\n1. MM-Vet (Multimodal Reasoning)")
@@ -471,7 +473,7 @@ def print_manual_instructions():
     
     print("\n3. JailBreakV-28k (Multimodal Jailbreaks)")
     print("   - Download from: https://github.com/SaFoLab-WISC/JailBreakV_28K")
-    print("   - Place files at (NOTE: the directory name is JailBreakV-28k, case-sensitive!):")
+    print("   - Place files at (NOTE: the directory name is JailBreakV-28k, case-sensitive with `-` not `_`!):")
     print("     - data/JailBreakV-28k/mini_JailBreakV_28K.csv")
     print("     - data/JailBreakV-28k/figstep/")
     print("     - data/JailBreakV-28k/llm_transfer_attack/")

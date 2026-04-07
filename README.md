@@ -52,8 +52,7 @@ The model downloading script will download the model to `./model` locally for fa
 ```bash
 python download_datasets.py
 ```
-
-Note that according to the licenses or policies of authors of some datasets, you need to download them manually and put it in the `data` directory. For example, JailbreakV-28k might ask you to fill out a form before you can download.
+After this, download the rest of the datasets with [This link](https://drive.google.com/file/d/1V09sherPVm6M0E_J_xz3uJ6IBrZ66cRV/view?usp=sharing) (recommended) or manually following the instructions in the terminal.
 
 ### 4. Verify Setup
 
