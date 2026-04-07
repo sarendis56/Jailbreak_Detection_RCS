@@ -8,8 +8,8 @@
 git clone https://github.com/haotian-liu/LLaVA.git
 conda create -n llava python=3.10 -y
 conda activate llava
-pip install -e ./LLaVA
-pip install -r requirements_llava.txt
+cd LLaVA && pip install -e . && cd ..
+pip install -r requirements_llava.txt  # additional packages required to run our experiments
 ```
 
 We also provide environment requirement files for different models:
@@ -78,13 +78,13 @@ python code/run_multiple_experiments.py --script kcd --model qwen --runs 5
 - Code in `analysis` can be used to replicate several visualizations such as PCA analysis and visualization of our layer selection heuristics.
 
 ## Contact
-Please contact Peichun Hua at <peichunhua04@gmail.com> for any question about the code or paper instead of the WashU email in the paper (because I have left WashU and do not have access to the mailbox anymore).
+Please contact Peichun Hua at <peichunhua04@gmail.com> for any question about the code or paper.
 
 ## Citation
 If you use this code or find our work helpful, please cite:
 
 ```bibtex
-@misc{hua2025rethinkingjailbreakdetectionlarge,
+@misc{hua2025rethinking,
   title        = {Rethinking Jailbreak Detection of Large Vision Language Models with Representational Contrastive Scoring},
   author       = {Hua, Peichun and Li, Hao and Shi, Shanghao and Yu, Zhiyuan and Zhang, Ning},
   year         = {2025},
