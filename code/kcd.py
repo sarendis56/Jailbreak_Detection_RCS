@@ -530,8 +530,6 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
         )
         scheduler_log_interval = max(epochs // 5, 1)
 
-    plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=CONFIG.PROJECTION_MAX_PATIENCE)
-
     model.train()
     best_loss = float('inf')
     patience_counter = 0
@@ -576,9 +574,6 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
 
         # Learning rate scheduling
         scheduler.step()
-
-        # Also apply plateau scheduler for adaptive reduction
-        plateau_scheduler.step(avg_loss)
 
         # Print progress with learning rate information
         current_lr = optimizer.param_groups[0]['lr']
@@ -930,10 +925,7 @@ class KCDDetector:
 
     def predict(self, features):
         """Predict whether samples are OOD (jailbreak) using KCD"""
-        if len(features) > 100:  # Use batch processing for larger datasets
-            scores = self._compute_kcd_scores_batch(features)
-        else:
-            scores = np.array([self.compute_kcd_score(x) for x in features])
+        scores = self._compute_kcd_scores_batch(features)
         predictions = (scores > self.threshold).astype(int)
         return predictions, scores
 

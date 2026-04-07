@@ -440,8 +440,6 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
         )
         scheduler_log_interval = max(epochs // 5, 1)
 
-    plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=CONFIG.PROJECTION_MAX_PATIENCE)
-
     model.train()
     best_loss = float('inf')
     patience_counter = 0
@@ -486,9 +484,6 @@ def train_learned_projection(features_dict, labels_dict, input_dim=None, output_
 
         # Learning rate scheduling
         scheduler.step()
-
-        # Also apply plateau scheduler for adaptive reduction
-        plateau_scheduler.step(avg_loss)
 
         # Print progress with learning rate information
         current_lr = optimizer.param_groups[0]['lr']
@@ -669,30 +664,35 @@ def compute_contrastive_loss(embeddings, dataset_labels, toxicity_labels,
 
     return total_loss, dataset_loss, toxicity_loss
 
-def compute_optimal_shrinkage(X, sample_cov):
-    """Compute optimal shrinkage intensity using Ledoit-Wolf formula"""
-    n, d = X.shape
+def compute_optimal_shrinkage(n, d, trace_cov, frobenius_sq):
+    """Ledoit-Wolf (2004) analytical optimal shrinkage intensity.
 
+    Computes the closed-form oracle shrinkage coefficient for the estimator
+        S_shrunk = (1 - λ) · S  +  λ · (tr(S)/d) · I
+    where (tr(S)/d)·I is the scaled-identity shrinkage target.
+
+    Formula (Ledoit & Wolf, 2004, Theorem 1):
+        λ* = clamp(((n-2)/n · ‖S‖_F² + tr(S)²) / ((n+2) · (‖S‖_F² − tr(S)²/d)), 0, 1)
+
+    Args:
+        n:           number of samples
+        d:           feature dimension
+        trace_cov:   tr(S) — trace of the sample covariance
+        frobenius_sq: ‖S‖_F² = tr(S²) — squared Frobenius norm of the sample covariance
+
+    Returns:
+        λ* in [0, 1]
+    """
     if n <= 1:
-        return 1.0  # Full shrinkage for very small samples
-
-    # Center the data
-    X_centered = X - np.mean(X, axis=0)
-
-    # Compute trace of sample covariance
-    trace_cov = np.trace(sample_cov)
-
-    # Estimate optimal shrinkage intensity
-    # This is a simplified version of the Ledoit-Wolf formula
-    if n < d:
-        # When n < d, use stronger shrinkage
-        lambda_opt = min(1.0, (d - n) / (d + n))
-    else:
-        # Standard Ledoit-Wolf shrinkage estimation
-        # Simplified formula for computational efficiency
-        lambda_opt = min(1.0, (d / n) * 0.1)
-
-    return lambda_opt
+        return 1.0
+    trace_sq = trace_cov ** 2
+    denominator = (n + 2) * (frobenius_sq - trace_sq / d)
+    if denominator <= 0:
+        # S is already proportional to identity (all eigenvalues equal);
+        # the target equals S so no shrinkage is needed.
+        return 0.0
+    numerator = (n - 2) / n * frobenius_sq + trace_sq
+    return min(1.0, max(0.0, numerator / denominator))
 
 def enhanced_ledoit_wolf_covariance(X, min_samples=50):
     """Enhanced Ledoit-Wolf covariance estimator with minimum sample size validation"""
@@ -716,10 +716,9 @@ def enhanced_ledoit_wolf_covariance(X, min_samples=50):
     trace_cov = np.trace(sample_cov)
     target = (trace_cov / d) * np.eye(d)
 
-    # Step 3: Enhanced shrinkage intensity (more conservative for small samples)
-    lambda_opt = compute_optimal_shrinkage(X, sample_cov)
-    if n < min_samples:
-        lambda_opt = max(0.2, lambda_opt)  # Minimum 20% shrinkage for small samples
+    # Step 3: Ledoit-Wolf analytical optimal shrinkage intensity
+    frobenius_sq = np.sum(sample_cov ** 2)
+    lambda_opt = compute_optimal_shrinkage(n, d, trace_cov, frobenius_sq)
 
     # Step 4: Shrunk estimator
     shrunk_cov = (1 - lambda_opt) * sample_cov + lambda_opt * target
@@ -760,18 +759,14 @@ def enhanced_ledoit_wolf_covariance_gpu(X, min_samples=50, device=None):
     trace_cov = torch.trace(sample_cov_gpu)
     target_gpu = (trace_cov / d) * torch.eye(d, device=device)
 
-    # Enhanced shrinkage intensity (match CPU implementation exactly)
-    # Convert back to CPU for shrinkage calculation to ensure consistency
-    sample_cov_cpu = sample_cov_gpu.cpu().numpy()
-    X_cpu = X_gpu.cpu().numpy()
-    lambda_opt = compute_optimal_shrinkage(X_cpu, sample_cov_cpu)
-    if n < min_samples:
-        lambda_opt = max(0.2, lambda_opt)  # Minimum 20% shrinkage for small samples
+    # Ledoit-Wolf analytical optimal shrinkage intensity.
+    # Extract two scalars from the GPU tensor — negligible transfer cost.
+    frobenius_sq = torch.sum(sample_cov_gpu ** 2)
+    lambda_opt = compute_optimal_shrinkage(n, d, trace_cov.item(), frobenius_sq.item())
 
-    # Shrunk estimator
+    # Shrunk estimator (all on GPU)
     shrunk_cov_gpu = (1 - lambda_opt) * sample_cov_gpu + lambda_opt * target_gpu
 
-    # Move back to CPU as numpy array
     return shrunk_cov_gpu.cpu().numpy()
 
 def compute_matrix_inverse_gpu(matrix, device=None):
@@ -788,9 +783,9 @@ def compute_matrix_inverse_gpu(matrix, device=None):
             # Try Cholesky first (faster for positive definite matrices)
             L = torch.linalg.cholesky(matrix_gpu)
             inv_gpu = torch.cholesky_inverse(L)
-        except:
-            # Fallback to general inverse
-            inv_gpu = torch.linalg.inv(matrix_gpu)
+        except torch.linalg.LinAlgError:
+            # Matrix is not positive definite; use pseudo-inverse (also handles singular matrices)
+            inv_gpu = torch.linalg.pinv(matrix_gpu)
 
         # Move back to CPU
         return inv_gpu.cpu().numpy()
@@ -799,38 +794,43 @@ def compute_matrix_inverse_gpu(matrix, device=None):
         print(f"    GPU matrix inversion failed: {e}, using CPU pseudo-inverse")
         return np.linalg.pinv(matrix)
 
+def _mahalanobis_distance_gpu_tensors(X_gpu, mean_gpu, cov_inv_gpu):
+    """Compute batch Mahalanobis distances from pre-converted GPU tensors.
+
+    Keeps computation entirely on GPU; caller is responsible for CPU↔GPU transfers.
+
+    Args:
+        X_gpu:      (N, D) GPU tensor of samples (must be 2-D)
+        mean_gpu:   (D,)   GPU tensor of cluster mean
+        cov_inv_gpu:(D, D) GPU tensor of inverse covariance
+
+    Returns:
+        (N,) GPU tensor of Mahalanobis distances
+    """
+    diff = X_gpu - mean_gpu.unsqueeze(0)          # (N, D)
+    temp = torch.matmul(diff, cov_inv_gpu)         # (N, D)
+    dist_sq = torch.sum(temp * diff, dim=1)        # (N,)
+    return torch.sqrt(torch.clamp(dist_sq, min=0)) # (N,)
+
+
 def mahalanobis_distance_batch_gpu(X, mean, cov_inv, device=None):
-    """GPU-accelerated batch Mahalanobis distance computation"""
+    """GPU-accelerated batch Mahalanobis distance computation (numpy in, numpy out)"""
     if device is None:
         device = GPU_DEVICE
 
     try:
-        # Convert inputs to GPU tensors (use float64 for numerical consistency)
         X_gpu = torch.tensor(X, dtype=torch.float64, device=device)
+        if X_gpu.dim() == 1:
+            X_gpu = X_gpu.unsqueeze(0)
         mean_gpu = torch.tensor(mean, dtype=torch.float64, device=device)
         cov_inv_gpu = torch.tensor(cov_inv, dtype=torch.float64, device=device)
 
-        # Compute differences (broadcasting)
-        if X_gpu.dim() == 1:
-            X_gpu = X_gpu.unsqueeze(0)  # Add batch dimension
-
-        diff = X_gpu - mean_gpu.unsqueeze(0)  # Shape: (batch_size, feature_dim)
-
-        # Batch Mahalanobis distance: sqrt((x-μ)ᵀ Σ⁻¹ (x-μ))
-        # result = diff @ cov_inv @ diff.T, but we want diagonal elements
-        temp = torch.matmul(diff, cov_inv_gpu)  # Shape: (batch_size, feature_dim)
-        distances_squared = torch.sum(temp * diff, dim=1)  # Element-wise multiply and sum
-        distances = torch.sqrt(torch.clamp(distances_squared, min=0))
-
-        # Move back to CPU
-        return distances.cpu().numpy()
+        return _mahalanobis_distance_gpu_tensors(X_gpu, mean_gpu, cov_inv_gpu).cpu().numpy()
 
     except Exception as e:
         print(f"    GPU Mahalanobis distance failed: {e}, using CPU fallback")
-        # CPU fallback
         if X.ndim == 1:
             X = X.reshape(1, -1)
-
         distances = []
         for x in X:
             diff = x - mean
@@ -838,9 +838,8 @@ def mahalanobis_distance_batch_gpu(X, mean, cov_inv, device=None):
                 result = np.dot(diff, cov_inv)
                 result = np.dot(result, diff)
                 distances.append(np.sqrt(max(0, result)))
-            except:
+            except Exception:
                 distances.append(np.linalg.norm(diff))
-
         return np.array(distances)
 
 class MCDDetector:
@@ -848,6 +847,10 @@ class MCDDetector:
     def __init__(self, use_gpu=True):
         self.in_distribution_clusters = {}  # {cluster_name: {'mean': ..., 'cov_inv': ...}}
         self.ood_clusters = {}  # {attack_type: {'mean': ..., 'cov_inv': ...}}
+        # GPU-cached cluster stats: pre-converted tensors so batch inference
+        # only needs one CPU→GPU transfer for the test features, not per cluster.
+        self.in_distribution_clusters_gpu = {}
+        self.ood_clusters_gpu = {}
         self.threshold = 0.0
         self.use_gpu = use_gpu and torch.cuda.is_available()
         if self.use_gpu:
@@ -902,7 +905,7 @@ class MCDDetector:
                 result = np.dot(diff, cov_inv)
                 result = np.dot(result, diff)
                 return np.sqrt(max(0, result))  # Ensure non-negative
-            except:
+            except Exception:
                 # Fallback to Euclidean distance if Mahalanobis fails
                 return np.linalg.norm(diff)
 
@@ -933,6 +936,11 @@ class MCDDetector:
                     'cov_inv': cov_inv,
                     'size': len(features)
                 }
+                if self.use_gpu:
+                    self.in_distribution_clusters_gpu[cluster_name] = {
+                        'mean': torch.tensor(mean, dtype=torch.float64, device=GPU_DEVICE),
+                        'cov_inv': torch.tensor(cov_inv, dtype=torch.float64, device=GPU_DEVICE),
+                    }
                 # print(f"  {cluster_name}: {len(features)} samples, dim={len(mean)}")
             else:
                 print(f"  Warning: {cluster_name} has only {len(features)} samples, skipping")
@@ -953,6 +961,11 @@ class MCDDetector:
                     'cov_inv': cov_inv,
                     'size': len(features)
                 }
+                if self.use_gpu:
+                    self.ood_clusters_gpu[attack_type] = {
+                        'mean': torch.tensor(mean, dtype=torch.float64, device=GPU_DEVICE),
+                        'cov_inv': torch.tensor(cov_inv, dtype=torch.float64, device=GPU_DEVICE),
+                    }
                 # print(f"  {attack_type}: {len(features)} samples, dim={len(mean)}")
             else:
                 print(f"  Warning: {attack_type} has only {len(features)} samples, skipping")
@@ -1091,17 +1104,36 @@ class MCDDetector:
         features = np.array(features)
         batch_size = len(features)
 
-        # Compute minimum distances to in-distribution clusters (batch)
-        in_dist_distances = np.full(batch_size, float('inf'))
-        for cluster_stats in self.in_distribution_clusters.values():
-            distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
-            in_dist_distances = np.minimum(in_dist_distances, distances)
+        if self.use_gpu and self.in_distribution_clusters_gpu:
+            # Convert test features to GPU once; loop over pre-cached cluster tensors.
+            # This replaces N_clusters separate CPU→GPU transfers with a single one.
+            features_gpu = torch.tensor(features, dtype=torch.float64, device=GPU_DEVICE)
 
-        # Compute minimum distances to OOD clusters (batch)
-        ood_distances = np.full(batch_size, float('inf'))
-        for cluster_stats in self.ood_clusters.values():
-            distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
-            ood_distances = np.minimum(ood_distances, distances)
+            in_dist_distances_gpu = torch.full((batch_size,), float('inf'), dtype=torch.float64, device=GPU_DEVICE)
+            for stats_gpu in self.in_distribution_clusters_gpu.values():
+                dists = _mahalanobis_distance_gpu_tensors(features_gpu, stats_gpu['mean'], stats_gpu['cov_inv'])
+                in_dist_distances_gpu = torch.minimum(in_dist_distances_gpu, dists)
+
+            ood_distances_gpu = torch.full((batch_size,), float('inf'), dtype=torch.float64, device=GPU_DEVICE)
+            for stats_gpu in self.ood_clusters_gpu.values():
+                dists = _mahalanobis_distance_gpu_tensors(features_gpu, stats_gpu['mean'], stats_gpu['cov_inv'])
+                ood_distances_gpu = torch.minimum(ood_distances_gpu, dists)
+
+            in_dist_distances = in_dist_distances_gpu.cpu().numpy()
+            ood_distances = ood_distances_gpu.cpu().numpy()
+            del features_gpu, in_dist_distances_gpu, ood_distances_gpu
+            torch.cuda.empty_cache()
+        else:
+            # CPU path
+            in_dist_distances = np.full(batch_size, float('inf'))
+            for cluster_stats in self.in_distribution_clusters.values():
+                distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
+                in_dist_distances = np.minimum(in_dist_distances, distances)
+
+            ood_distances = np.full(batch_size, float('inf'))
+            for cluster_stats in self.ood_clusters.values():
+                distances = self._mahalanobis_distance_batch(features, cluster_stats['mean'], cluster_stats['cov_inv'])
+                ood_distances = np.minimum(ood_distances, distances)
 
         # Handle edge cases
         scores = np.zeros(batch_size)

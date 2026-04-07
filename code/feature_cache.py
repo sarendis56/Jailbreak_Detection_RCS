@@ -1,3 +1,4 @@
+import json
 import pickle
 import os
 import re
@@ -71,6 +72,16 @@ class FeatureCache:
         with open(cache_path, 'wb') as f:
             pickle.dump(cache_data, f)
 
+        # Write a lightweight JSON sidecar containing only metadata so that
+        # get_cache_entry() can find entries without deserializing the full pickle.
+        sidecar_path = cache_path.replace('.pkl', '.json')
+        sidecar = {k: v for k, v in cache_data.items() if k not in ('hidden_states', 'labels')}
+        # layer_range may be a tuple; make it JSON-serialisable
+        if isinstance(sidecar.get('layer_range'), tuple):
+            sidecar['layer_range'] = list(sidecar['layer_range'])
+        with open(sidecar_path, 'w') as f:
+            json.dump(sidecar, f)
+
         print(f"Features cached to {cache_path}")
         print(f"Cache key: {cache_key}")
 
@@ -93,14 +104,46 @@ class FeatureCache:
         """
         Retrieve cached metadata for a specific dataset/model combination without knowing layer range.
         Returns the cache data dict if a matching entry is found, otherwise None.
+
+        Fast path: reads lightweight .json sidecars instead of deserialising full .pkl files.
+        Falls back to scanning .pkl files for legacy entries that pre-date sidecar generation.
         """
         if not os.path.exists(self.cache_dir):
             return None
 
+        # --- Fast path: scan JSON sidecars (metadata only, no array data) ---
+        for file in os.listdir(self.cache_dir):
+            if not file.endswith('.json'):
+                continue
+            sidecar_path = os.path.join(self.cache_dir, file)
+            try:
+                with open(sidecar_path, 'r') as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+
+            if dataset_name is not None and meta.get('dataset_name') != dataset_name:
+                continue
+            if model_path is not None and meta.get('model_path') != model_path:
+                continue
+            if dataset_size is not None and meta.get('dataset_size') != dataset_size:
+                continue
+            if experiment_name is not None and meta.get('experiment_name') != experiment_name:
+                continue
+
+            # Match found — return metadata dict with path to the corresponding pkl
+            pkl_path = sidecar_path.replace('.json', '.pkl')
+            meta['cache_path'] = pkl_path
+            return meta
+
+        # --- Legacy fallback: scan .pkl files without a sidecar ---
         for file in os.listdir(self.cache_dir):
             if not file.endswith('.pkl'):
                 continue
             cache_path = os.path.join(self.cache_dir, file)
+            # Skip if a sidecar already exists (would have been found above)
+            if os.path.exists(cache_path.replace('.pkl', '.json')):
+                continue
             try:
                 with open(cache_path, 'rb') as f:
                     cache_data = pickle.load(f)
