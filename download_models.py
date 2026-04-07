@@ -104,8 +104,6 @@ def download_llava_v16_vicuna_7b(model_dir):
         snapshot_download(
             repo_id=model_name,
             local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True
         )
         
         print(f"[SUCCESS] Successfully downloaded LLaVA-v1.6-Vicuna-7B to {local_dir}")
@@ -163,8 +161,6 @@ def download_flava_model(model_dir):
         snapshot_download(
             repo_id=model_name,
             local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True
         )
         
         print(f"[SUCCESS] Successfully downloaded FLAVA to {local_dir}")
@@ -216,8 +212,6 @@ def download_clip_model(model_dir):
         snapshot_download(
             repo_id=model_name,
             local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True
         )
         
         print(f"[SUCCESS] Successfully downloaded CLIP to {local_dir}")
@@ -251,8 +245,6 @@ def download_clip_large_model(model_dir):
         snapshot_download(
             repo_id=model_name,
             local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True
         )
 
         print(f"[SUCCESS] Successfully downloaded CLIP ViT Large to {local_dir}")
@@ -309,8 +301,6 @@ def download_qwen25_vl_3b_model(model_dir):
         snapshot_download(
             repo_id=model_name,
             local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True
         )
 
         print(f"[SUCCESS] Successfully downloaded Qwen2.5-VL-3B-Instruct to {local_dir}")
@@ -361,8 +351,6 @@ def download_qwen25_vl_7b_model(model_dir):
         snapshot_download(
             repo_id=model_name,
             local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True
         )
 
         print(f"[SUCCESS] Successfully downloaded Qwen2.5-VL-7B-Instruct to {local_dir}")
@@ -413,8 +401,6 @@ def download_internvl3_8b_model(model_dir):
         snapshot_download(
             repo_id=model_name,
             local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            resume_download=True
         )
 
         print(f"[SUCCESS] Successfully downloaded InternVL3-8B to {local_dir}")

@@ -17,9 +17,20 @@ Manual datasets (need to be obtained separately):
 
 import os
 import json
+from collections.abc import Mapping
+from typing import Any, cast
+
 from datasets import load_dataset
 from tqdm import tqdm
 import pandas as pd
+
+
+DatasetRow = Mapping[str, Any]
+
+
+def as_dataset_row(item: object) -> DatasetRow:
+    """Tell the type checker that HuggingFace rows are dict-like records."""
+    return cast(DatasetRow, item)
 
 def create_directory_structure():
     """Create the required directory structure"""
@@ -56,14 +67,16 @@ def download_alpaca():
 
     samples = []
     for item in tqdm(dataset, desc="Processing Alpaca samples"):
+        row = as_dataset_row(item)
+
         # Convert to our standard format
         sample = {
-            "txt": item["instruction"] + " " + (item["input"] if item["input"] else ""),
+            "txt": row["instruction"] + " " + (row["input"] if row["input"] else ""),
             "img": None,  # Text-only dataset
             "toxicity": 0,  # Benign samples
-            "instruction": item["instruction"],
-            "input": item["input"],
-            "output": item["output"]
+            "instruction": row["instruction"],
+            "input": row["input"],
+            "output": row["output"]
         }
         samples.append(sample)
 
@@ -92,12 +105,14 @@ def download_advbench():
 
     samples = []
     for item in tqdm(dataset, desc="Processing AdvBench samples"):
+        row = as_dataset_row(item)
+
         # Check available keys and use appropriate field
         text_field = None
         target_field = None
 
         # Try different possible field names
-        for key in item.keys():
+        for key in row.keys():
             if key.lower() in ['goal', 'prompt', 'text', 'instruction']:
                 text_field = key
             if key.lower() in ['target', 'response', 'output']:
@@ -105,13 +120,13 @@ def download_advbench():
 
         if text_field:
             sample = {
-                "txt": item[text_field],
+                "txt": row[text_field],
                 "img": None,  # Text-only dataset
                 "toxicity": 1,  # Malicious samples
                 "source_field": text_field
             }
             if target_field:
-                sample["target"] = item[target_field]
+                sample["target"] = row[target_field]
             samples.append(sample)
 
     # Ensure directory exists before writing
@@ -139,24 +154,26 @@ def download_dan_prompts():
 
     samples = []
     for item in tqdm(dataset, desc="Processing jailbreak prompts"):
+        row = as_dataset_row(item)
+
         # Check available keys and use appropriate field
         text_field = None
 
         # Try different possible field names for jailbreak prompts
-        for key in item.keys():
+        for key in row.keys():
             if key.lower() in ['prompt', 'text', 'jailbreak', 'content', 'input']:
                 text_field = key
                 break
 
-        if text_field and item[text_field]:
+        if text_field and row[text_field]:
             sample = {
-                "txt": item[text_field],
+                "txt": row[text_field],
                 "img": None,  # Text-only dataset
                 "toxicity": 1,  # Malicious samples (jailbreak prompts)
                 "source_field": text_field
             }
             # Add any additional fields
-            for key, value in item.items():
+            for key, value in row.items():
                 if key != text_field and key not in sample:
                     sample[key] = value
             samples.append(sample)
@@ -186,18 +203,20 @@ def download_openassistant():
 
     samples = []
     for item in tqdm(dataset, desc="Processing OpenAssistant samples"):
+        row = as_dataset_row(item)
+
         # Only use assistant responses that are not deleted and have good quality
-        if (item["role"] == "assistant" and
-            not item.get("deleted", False) and
-            item.get("rank", 0) == 0):  # Best ranked responses
+        if (row["role"] == "assistant" and
+            not row.get("deleted", False) and
+            row.get("rank", 0) == 0):  # Best ranked responses
 
             sample = {
-                "txt": item["text"],
+                "txt": row["text"],
                 "img": None,  # Text-only dataset
                 "toxicity": 0,  # Benign samples
-                "message_id": item["message_id"],
-                "parent_id": item["parent_id"],
-                "lang": item["lang"]
+                "message_id": row["message_id"],
+                "parent_id": row["parent_id"],
+                "lang": row["lang"]
             }
             samples.append(sample)
 
@@ -233,30 +252,31 @@ def download_vqav2():
     max_samples = 1000  # Download up to 1000 samples
 
     for idx, item in enumerate(tqdm(dataset, desc="Processing VizWiz-VQA samples")):
+        row = as_dataset_row(item)
         if idx >= max_samples:
             break
 
         # Save image if available
         image_filename = None
-        if item.get("image") is not None:
+        if row.get("image") is not None:
             try:
                 image_filename = f"vizwiz_{idx:06d}.jpg"
                 image_path = os.path.join(images_dir, image_filename)
                 
                 # Save the PIL image
-                item["image"].save(image_path, "JPEG")
+                row["image"].save(image_path, "JPEG")
             except Exception as e:
                 print(f"Warning: Could not save image {idx}: {e}")
                 image_filename = None
 
         # Create sample
         sample = {
-            "txt": item.get("question", ""),
+            "txt": row.get("question", ""),
             "img": image_filename,  # Store relative path to image
             "toxicity": 0,  # Benign samples
-            "question_id": item.get("question_id", f"vizwiz_{idx}"),
-            "image_id": item.get("image_id", f"img_{idx}"),
-            "answers": item.get("answers", [])
+            "question_id": row.get("question_id", f"vizwiz_{idx}"),
+            "image_id": row.get("image_id", f"img_{idx}"),
+            "answers": row.get("answers", [])
         }
         samples.append(sample)
 
@@ -297,24 +317,26 @@ def download_xstest():
     json_samples = []  # Keep JSON version for compatibility
 
     for item in tqdm(dataset, desc="Processing XSTest samples"):
+        row = as_dataset_row(item)
+
         # CSV row for load_XSTest function
         csv_row = {
-            "prompt": item["prompt"],
-            "type": item["type"],
-            "focus": item.get("focus", ""),
-            "note": item.get("note", "")
+            "prompt": row["prompt"],
+            "type": row["type"],
+            "focus": row.get("focus", ""),
+            "note": row.get("note", "")
         }
         csv_data.append(csv_row)
 
         # JSON sample for compatibility
-        is_toxic = 1 if "contrast" in item.get("type", "") else 0
+        is_toxic = 1 if "contrast" in row.get("type", "") else 0
         json_sample = {
-            "txt": item["prompt"],
+            "txt": row["prompt"],
             "img": None,  # Text-only dataset
             "toxicity": is_toxic,
-            "type": item["type"],
-            "focus": item.get("focus", ""),
-            "note": item.get("note", "")
+            "type": row["type"],
+            "focus": row.get("focus", ""),
+            "note": row.get("note", "")
         }
         json_samples.append(json_sample)
 
@@ -373,21 +395,22 @@ def download_mm_safety_bench():
                     dataset = load_dataset("PKU-Alignment/MM-SafetyBench", config, split=split)
 
                     for idx, item in enumerate(tqdm(dataset, desc=f"Processing {config}-{split} samples")):
+                        row = as_dataset_row(item)
                         image_filename = None
-                        if item.get('image') is not None:
+                        if row.get('image') is not None:
                             try:
                                 image_filename = f"{config}_{split}_{idx:06d}.jpg"
                                 image_path = os.path.join(images_dir, image_filename)
 
-                                item['image'].save(image_path, "JPEG")
+                                row['image'].save(image_path, "JPEG")
                                 image_filename = f"images/{config}/{image_filename}"
                             except Exception as e:
                                 print(f"      Warning: Could not save image {config}-{split}-{idx}: {e}")
                                 image_filename = None
 
                         sample = {
-                            'id': item.get('id', ''),
-                            'question': item.get('question', ''),
+                            'id': row.get('id', ''),
+                            'question': row.get('question', ''),
                             'image': image_filename,
                             'category': config,
                             'split': split,
