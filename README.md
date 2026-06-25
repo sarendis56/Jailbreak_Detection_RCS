@@ -85,12 +85,16 @@ Please contact Peichun Hua at <peichunhua04@gmail.com> for any question about th
 If you use this code or find our work helpful, please cite:
 
 ```bibtex
-@misc{hua2025rethinking,
-  title        = {Rethinking Jailbreak Detection of Large Vision Language Models with Representational Contrastive Scoring},
-  author       = {Hua, Peichun and Li, Hao and Shi, Shanghao and Yu, Zhiyuan and Zhang, Ning},
-  year         = {2025},
-  eprint       = {2512.12069},
-  archivePrefix= {arXiv},
-  primaryClass = {cs.CR},
-  url          = {https://arxiv.org/abs/2512.12069}
+@inproceedings{hua2026rethinking,
+    author = {Hua, Peichun and Li, Hao and Shi, Shanghao and Yu, Zhiyuan and Zhang, Ning},
+    editor = {Liakata, Maria and Moreira, Viviane P. and Zhang, Jiajun and Jurgens, David},
+    booktitle = "Proceedings of the 64th Annual Meeting of the {A}ssociation for {C}omputational {L}inguistics (Volume 1: Long Papers)",
+    month = jul,
+    year = "2026",
+    address = "San Diego, California, United States",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2026.acl-long.992/",
+    pages = "21748--21785",
+    ISBN = "979-8-89176-390-6",
 }
+```
